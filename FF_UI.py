@@ -15,6 +15,8 @@ from tkinter import ttk, font, messagebox, filedialog, PhotoImage
 import os
 import gc
 
+from FF_utils import App_Explorer
+
 
 
 # ================= Program parameters ==========
@@ -123,12 +125,16 @@ class FFE_UI(Tk):
 
     '''Run function'''
     def accept(self):
-        if self.source.get() == '*Select path here*':
+        if self.source.get() == '*Select path here*':   # Check if path is introduced
             messagebox.showwarning("Warning!", "Source path not added")
-        elif self.Cb_opt3.get() == '*Select action*':
+        elif self.Cb_opt3.get() == '*Select action*':   # Check if action is selected
             messagebox.showwarning("Warning!", "No action selected")
-        else:
-            print("done")
+        else:   # Execute application function
+            token = App_Explorer(self.source.get(), self.d_type.get(), self.seed.get())
+            if token:
+                print('  Directory saved.')
+            else:
+                print('  No {} was found, nothing was saved.'.format('file' if self.d_type.get() else 'folder'))
 
 
     '''Exit function'''
