@@ -10,8 +10,6 @@ Juan García Sánchez, 2023
 ###############################################################################
 
 import os
-import glob
-import re
 import shutil
 import zipfile
 import gc
@@ -53,8 +51,12 @@ def App_Explorer(path, d_type, action, filter_name = ''):
                         with zipfile.ZipFile(path + fd.split('\\')[-1] + '.zip', 'w', zipfile.ZIP_DEFLATED, allowZip64 = True) as zf:
                             for fl in os.listdir(fd):
                                 zf.write(fd + '\\' + fl, fl)
-            for fd in d_list:
-                shutil.rmtree(fd, ignore_errors = False, onerror = None)
+            if d_type:
+                for fl in d_list:
+                    os.remove(fl)
+            else:
+                for fd in d_list:
+                    shutil.rmtree(fd, ignore_errors = False, onerror = None)
     else:
         a = 0
 
