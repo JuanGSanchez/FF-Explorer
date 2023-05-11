@@ -32,7 +32,7 @@ def App_Explorer(path, d_type, action, filter_name = ''):
                 if filter_name in file: d_list.append(root + '\\' + file)
 
     if len(d_list) != 0:
-        a = 1
+        a = 1   # token to determine if d_list variable is empty
         if action == 1:
             with open(path + '\\directory-' + d_save + filter_name + '.txt', 'w') as fp:
                 for i in range(len(d_list)):
