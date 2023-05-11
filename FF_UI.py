@@ -64,7 +64,7 @@ class FFE_UI(Tk):
         self.source = StringVar(value = '*Select path here*')   # Source path variable
         self.seed = StringVar(value = '')   # Files/folders' name filter, string that is contained in files/folders' name
         self.d_type = IntVar(value = 0)   # 0, folder directory; 1, file directory
-        self.list_options = ['*Select action*','Save list','Remove list','Compress list']   # List with options to handle the directory obtained
+        self.dict_options = {'*Select action*': -1, 'Save list': 1, 'Remove list': 2, 'Compress list': 3}   # List with options to handle the directory obtained
 
 # UI layout
         '''Source path selection, from which all nested files or folders will be listed'''
@@ -88,8 +88,8 @@ class FFE_UI(Tk):
         Rd_opt1.grid(row = 4, column = 0, padx = 15, pady = 7, ipadx = 1, ipady = 5, sticky = W)
         Rd_opt2 = Radiobutton(self, text = "Files", var = self.d_type, value = 1, bd = 2, activebackground = "#bfbfbf", activeforeground = "green", bg = "#bfbfbf", fg = "black", font = "Verdana 11", justify = LEFT)
         Rd_opt2.grid(row = 4, column = 0, padx = 15, pady = 7, ipadx = 1, ipady = 5, sticky = E)
-        self.Cb_opt3 = ttk.Combobox(self, values = self.list_options, background = "#e6e6e6", state = "readonly", width = 18)
-        self.Cb_opt3.set(self.list_options[0])
+        self.Cb_opt3 = ttk.Combobox(self, values = list(self.dict_options.keys()), background = "#e6e6e6", state = "readonly", width = 18)
+        self.Cb_opt3.set(list(self.dict_options.keys())[0])
         self.Cb_opt3.grid(row = 5, column = 0, padx = 10, pady = 5, ipadx = 10, ipady = 5)
 
         '''Run button'''
@@ -102,7 +102,10 @@ class FFE_UI(Tk):
                                     + __author__ + '\nVersion: ' + __version__ + '\nLicense: ' + __license__))
         self.menucontext.add_command(label = "Exit", command = self.exit)
 
+# UI bindings
         self.bind("<3>", self.show_menucontext)
+        self.bind("<Return>", lambda event: self.accept())
+        self.bind("<BackSpace>", lambda event: self.exit())
 
 # UI mainloop
         self.mainloop()
@@ -130,11 +133,12 @@ class FFE_UI(Tk):
         elif self.Cb_opt3.get() == '*Select action*':   # Check if action is selected
             messagebox.showwarning("Warning!", "No action selected")
         else:   # Execute application function
-            token = App_Explorer(self.source.get(), self.d_type.get(), self.seed.get())
+            token = App_Explorer(self.source.get(), self.d_type.get(), self.dict_options[self.Cb_opt3.get()], self.seed.get())
+            ending = 'saved' if self.dict_options[self.Cb_opt3.get()] == 1 else 'deleted' if self.dict_options[self.Cb_opt3.get()] == 2 else 'compressed'
             if token:
-                print('  Directory saved.')
+                print('  Directory {}.'.format(ending))
             else:
-                print('  No {} was found, nothing was saved.'.format('file' if self.d_type.get() else 'folder'))
+                print('  No {} was found, nothing was {}.'.format('file' if self.d_type.get() else 'folder', ending))
 
 
     '''Exit function'''
