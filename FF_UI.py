@@ -122,8 +122,8 @@ class FFE_UI(Tk):
 
 # UI bindings
         self.bind("<3>", self.show_menucontext)
-        self.bind("<Return>", lambda : self.accept())
-        self.bind("<Control_R>", lambda : self.exit())
+        self.bind("<Return>", lambda event: self.accept())
+        self.bind("<Control_R>", lambda event: self.exit())
 
 # UI mainloop
         self.mainloop()
