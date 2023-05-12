@@ -9,6 +9,7 @@ Juan García Sánchez, 2023
 #                                                                             #
 ###############################################################################
 
+import telnetlib
 from tkinter import *
 from tkinter import ttk, font, messagebox, filedialog, PhotoImage
 from PIL import ImageTk, Image
@@ -45,7 +46,7 @@ class FFE_UI(Tk):
         self.lift()
         self.focus_force()
         icon = PhotoImage(file =  __rootf__ + "/Logo FFE.png")
-        self.iconphoto(True, icon)
+        self.iconphoto(False, icon)
         self.config(bg = "#bfbfbf")
 
 # Style settings
@@ -57,7 +58,7 @@ class FFE_UI(Tk):
         self.style_opts = {'bg' : '#bfbfbf', 'fg' : 'black', 'font' : 'Verdana 12', 'activebackground' : '#bfbfbf', 'activeforeground' : 'green'}
         self.font_title = {'bg' : '#999999', 'fg' : 'blue', 'font' : 'Arial 12 bold'}
         self.font_entry = {'bg' : 'white', 'fg' : 'black', 'font' : 'Verdana 11'}
-        self.font_text = {'font' : "Arial 11", 'fg' : 'black'}
+        self.font_text = {'bg' : 'darkblue', 'font' : "Arial 11", 'fg' : 'white'}
 
 # UI variables
         self.source = StringVar(value = '*Select path here*')   # Source path variable
@@ -95,6 +96,25 @@ class FFE_UI(Tk):
         but_run = Button(self, text = "Run", bd = 3, relief = RAISED, command = self.accept, **self.style_but, width = 5)
         but_run.grid(row = 6, column = 0, padx = 10, pady = 10, ipadx = 10, ipady = 5)
 
+# UI manual
+        text_man1 = 'Source path in which\nfiles or folders are searched.'
+        text_man2 = "List of consecutive characters\ncontained in files/folders' name."
+        text_man3 = 'Folders search.'
+        text_man4 = 'Files search.'
+        text_man5 = 'Actions to be applied to\nthe resulting directory.'
+        fr_man = Toplevel(self, bd= 2, bg = 'darkblue')
+        fr_man.resizable(False, False)
+        fr_man.overrideredirect(True)
+        fr_man.wm_attributes('-alpha', 0.8)
+        fr_man.withdraw()
+        self.fr_lab = Label(fr_man, justify = LEFT, bd = 2, **self.font_text)
+        self.fr_lab.grid(padx = 1, pady = 1, sticky = W)
+        self.ent_path.bind("<Motion>", lambda event : self.show_manual(event, fr_man, [211, 39, 200, 45], text_man1))
+        ent_filter.bind("<Motion>", lambda event : self.show_manual(event, fr_man, [211, 39, 220, 45], text_man2))
+        Rd_opt1.bind("<Motion>", lambda event : self.show_manual(event, fr_man, [90, 30, 115, 30], text_man3))
+        Rd_opt2.bind("<Motion>", lambda event : self.show_manual(event, fr_man, [70, 30, 100, 30], text_man4))
+        self.Cb_opt3.bind("<Motion>", lambda event : self.show_manual(event, fr_man, [200, 30, 165, 45], text_man5))
+
 # UI contextual menu
         self.menucontext = Menu(self, tearoff = 0)
         self.menucontext.add_command(label = "About...", command = lambda : print('Author: '
@@ -103,8 +123,8 @@ class FFE_UI(Tk):
 
 # UI bindings
         self.bind("<3>", self.show_menucontext)
-        self.bind("<Return>", lambda event: self.accept())
-        self.bind("<Control_R>", lambda event: self.exit())
+        self.bind("<Return>", lambda : self.accept())
+        self.bind("<Control_R>", lambda : self.exit())
 
 # UI mainloop
         self.mainloop()
@@ -118,6 +138,16 @@ class FFE_UI(Tk):
         if adress != '':
             self.source.set(adress)
             self.ent_path.xview_moveto(1)
+
+
+    ''' Show widget manual'''
+    def show_manual(self, e, fr, pos, text_man):
+        if 0 < e.x < pos[0] and 0 < e.y < pos[1]:
+            fr.deiconify()
+            self.fr_lab.config(text = text_man)
+            fr.geometry('{}x{}+{}+{}'.format(pos[2], pos[3], e.x_root + 20, e.y_root + 20))
+        else:
+            fr.withdraw()
 
 
     ''' Show contextual menu'''
