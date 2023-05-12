@@ -9,7 +9,6 @@ Juan García Sánchez, 2023
 #                                                                             #
 ###############################################################################
 
-import telnetlib
 from tkinter import *
 from tkinter import ttk, font, messagebox, filedialog, PhotoImage
 from PIL import ImageTk, Image
