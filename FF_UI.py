@@ -51,7 +51,7 @@ class FFE_UI(Tk):
 # Style settings
         default_font = font.nametofont("TkDefaultFont")
         default_font.configure(family = 'TimesNewRoman', size = 12)
-        self.option_add("*Font", default_font)  # Fuente predeterminada        
+        self.option_add("*Font", default_font)  # Default font      
 
         self.style_but = {'bg' : "white", 'fg' : 'black', 'font' : "Arial 12", 'activebackground' : 'white', 'activeforeground' : 'black'}
         self.style_opts = {'bg' : '#bfbfbf', 'fg' : 'black', 'font' : 'Verdana 12', 'activebackground' : '#bfbfbf', 'activeforeground' : 'green'}
@@ -60,14 +60,14 @@ class FFE_UI(Tk):
         self.font_text = {'bg' : 'darkblue', 'font' : "Arial 11", 'fg' : 'white'}
 
 # UI variables
-        self.source = StringVar(value = '*Select path here*')   # Source path variable
+        self.source = StringVar(value = '*Select path here*')   # Root path variable
         self.seed = StringVar(value = '')   # Files/folders' name filter, string that is contained in files/folders' name
         self.d_type = IntVar(value = 0)   # 0, folder directory; 1, file directory
         self.dict_options = {'*Select action*': -1, 'Save list': 1, 'Remove list': 2, 'Compress list': 3}   # List with options to handle the directory obtained
 
 # UI layout
         '''Source path selection, from which all nested files or folders will be listed'''
-        lab_path = Label(self, text = "Source path", justify = CENTER, bd = 2, width = 18, **self.font_title)
+        lab_path = Label(self, text = "Root path", justify = CENTER, bd = 2, width = 18, **self.font_title)
         lab_path.grid(row = 0, column = 0, padx = 10, pady = 7, ipadx = 10, ipady = 5)
         self.ent_path = Entry(self, textvariable = self.source, justify = LEFT, bd = 5, relief = SUNKEN, state = "readonly", cursor = "hand2", width = 18, **self.font_entry)
         self.ent_path.grid(row = 1, column = 0, padx = 10, pady = 5, ipadx = 10, ipady = 5)
@@ -96,11 +96,13 @@ class FFE_UI(Tk):
         but_run.grid(row = 6, column = 0, padx = 10, pady = 10, ipadx = 10, ipady = 5)
 
 # UI manual
-        text_man1 = 'Source path in which\nfiles or folders are searched.'
+        text_man1 = 'Root path in which\nfiles or folders are searched.'
         text_man2 = "List of consecutive characters\ncontained in files/folders' name."
         text_man3 = 'Folders search.'
         text_man4 = 'Files search.'
         text_man5 = 'Actions to be applied to\nthe resulting directory.'
+        self.aux_man = ['', '\n   Save directory of files/folders found', '\n   Delete files/folders found',
+                        '\n   For files, compress all in one .zip in root\n   For folders, compress each one in root', '']
         fr_man = Toplevel(self, bd= 2, bg = 'darkblue')
         fr_man.resizable(False, False)
         fr_man.overrideredirect(True)
@@ -113,6 +115,7 @@ class FFE_UI(Tk):
         Rd_opt1.bind("<Motion>", lambda event : self.show_manual(event, fr_man, [90, 30, 115, 30], text_man3))
         Rd_opt2.bind("<Motion>", lambda event : self.show_manual(event, fr_man, [70, 30, 100, 30], text_man4))
         self.Cb_opt3.bind("<Motion>", lambda event : self.show_manual(event, fr_man, [200, 30, 165, 45], text_man5))
+        self.Cb_opt3.bind("<MouseWheel>", lambda event: self.show_manual(event, fr_man, [200, 30, 165, 45], text_man5))
 
 # UI contextual menu
         self.menucontext = Menu(self, tearoff = 0)
@@ -133,7 +136,7 @@ class FFE_UI(Tk):
 # Additional functions of the class
     '''Source directory selection function'''
     def source_selection(self, event):
-        adress = filedialog.askdirectory(initialdir = "", title = "FF Explorer, source path selection")
+        adress = filedialog.askdirectory(initialdir = "", title = "FF Explorer, root path selection")
         if adress != '':
             self.source.set(adress)
             self.ent_path.xview_moveto(1)
@@ -143,7 +146,21 @@ class FFE_UI(Tk):
     def show_manual(self, e, fr, pos, text_man):
         if 0 < e.x < pos[0] and 0 < e.y < pos[1]:
             fr.deiconify()
-            self.fr_lab.config(text = text_man)
+            if str(e.widget) == '.!combobox':
+                self.fr_lab.config(text = text_man + self.aux_man[self.dict_options[self.Cb_opt3.get()]])
+                match self.dict_options[self.Cb_opt3.get()]:
+                    case -1:
+                        pass
+                    case 0:
+                        pass
+                    case 1:
+                        pos[2], pos[3] = 250, 63
+                    case 2:
+                        pos[2], pos[3] = 185, 63
+                    case 3:
+                        pos[2], pos[3] = 285, 78
+            else:
+                self.fr_lab.config(text = text_man)
             fr.geometry('{}x{}+{}+{}'.format(pos[2], pos[3], e.x_root + 20, e.y_root + 20))
         else:
             fr.withdraw()
