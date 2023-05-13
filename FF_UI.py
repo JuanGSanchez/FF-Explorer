@@ -115,7 +115,6 @@ class FFE_UI(Tk):
         Rd_opt1.bind("<Motion>", lambda event : self.show_manual(event, fr_man, [90, 30, 115, 30], text_man3))
         Rd_opt2.bind("<Motion>", lambda event : self.show_manual(event, fr_man, [70, 30, 100, 30], text_man4))
         self.Cb_opt3.bind("<Motion>", lambda event : self.show_manual(event, fr_man, [200, 30, 165, 45], text_man5))
-        self.Cb_opt3.bind("<MouseWheel>", lambda event: self.show_manual(event, fr_man, [200, 30, 165, 45], text_man5))
 
 # UI contextual menu
         self.menucontext = Menu(self, tearoff = 0)
