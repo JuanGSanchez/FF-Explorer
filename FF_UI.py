@@ -11,7 +11,6 @@ Juan García Sánchez, 2023
 
 from tkinter import *
 from tkinter import ttk, font, messagebox, filedialog, PhotoImage
-from PIL import ImageTk, Image
 import os
 import gc
 
