@@ -25,7 +25,7 @@ __title__= 'FF Explorer'
 __rootf__ = os.getcwd()
 __version__ = '1.0'
 __datver__ = '05-2023'
-__pyver__ = '3.10.9'
+__pyver__ = '3.11.3'
 __license__ = 'GPLv3'
 
 
