@@ -56,11 +56,11 @@ class FFE_UI(Tk):
         default_font.configure(family = 'TimesNewRoman', size = 12)
         self.option_add("*Font", default_font)  # Default font      
 
-        self.style_but = {'bg' : "white", 'fg' : 'black', 'font' : "Arial 12", 'activebackground' : 'white', 'activeforeground' : 'black'}
-        self.style_opts = {'bg' : '#bfbfbf', 'fg' : 'black', 'font' : 'Verdana 12', 'activebackground' : '#bfbfbf', 'activeforeground' : 'green'}
-        self.font_title = {'bg' : '#999999', 'fg' : 'blue', 'font' : 'Arial 12 bold'}
-        self.font_entry = {'bg' : 'white', 'fg' : 'black', 'font' : 'Verdana 11'}
-        self.font_man = {'bg' : 'darkblue', 'font' : "Arial 11", 'fg' : 'white'}
+        style_but = {'bg' : "white", 'fg' : 'black', 'font' : "Arial 12", 'activebackground' : 'white', 'activeforeground' : 'black'}
+        style_opts = {'bg' : '#bfbfbf', 'fg' : 'black', 'font' : 'Verdana 12', 'activebackground' : '#bfbfbf', 'activeforeground' : 'green'}
+        font_title = {'bg' : '#999999', 'fg' : 'blue', 'font' : 'Arial 12 bold'}
+        font_entry = {'bg' : 'white', 'fg' : 'black', 'font' : 'Verdana 11'}
+        font_man = {'bg' : 'darkblue', 'font' : "Arial 11", 'fg' : 'white'}
 
 # UI variables
         self.source = StringVar(value = '*Select path here*')   # Root path variable
@@ -70,32 +70,32 @@ class FFE_UI(Tk):
 
 # UI layout
         ''' Source path selection, from which all nested files or folders will be listed '''
-        lab_path = Label(self, text = "Root path", justify = CENTER, bd = 2, width = 18, **self.font_title)
+        lab_path = Label(self, text = "Root path", justify = CENTER, bd = 2, width = 18, **font_title)
         lab_path.grid(row = 0, column = 0, padx = 10, pady = 7, ipadx = 10, ipady = 5)
-        self.ent_path = Entry(self, textvariable = self.source, justify = LEFT, bd = 5, relief = SUNKEN, state = "readonly", cursor = "hand2", width = 18, **self.font_entry)
+        self.ent_path = Entry(self, textvariable = self.source, justify = LEFT, bd = 5, relief = SUNKEN, state = "readonly", cursor = "hand2", width = 18, **font_entry)
         self.ent_path.grid(row = 1, column = 0, padx = 10, pady = 5, ipadx = 10, ipady = 5)
         self.ent_path.bind("<1>", self.source_selection)
         self.ent_path.bind("<MouseWheel>", lambda event: self.ent_path.xview_scroll(int(event.delta/40), 'units'))
 
         ''' Stablishment of a name seed, a chain of characters that must be included in the file/folder name.
         It acts as a filter tool; by leaving it blank, all nested files/folders will be listed '''
-        lab_filter = Label(self, text = "Name seed", justify = CENTER, bd = 2, width = 18, **self.font_title)
+        lab_filter = Label(self, text = "Name seed", justify = CENTER, bd = 2, width = 18, **font_title)
         lab_filter.grid(row = 2, column = 0, padx = 10, pady = 7, ipadx = 10, ipady = 5)
-        ent_filter = Entry(self, textvariable = self.seed, justify = LEFT, bd = 5, relief = SUNKEN, width = 18, **self.font_entry)
+        ent_filter = Entry(self, textvariable = self.seed, justify = LEFT, bd = 5, relief = SUNKEN, width = 18, **font_entry)
         ent_filter.grid(row = 3, column = 0, padx = 10, pady = 5, ipadx = 10, ipady = 5)
         ent_filter.bind("<MouseWheel>", lambda event: ent_filter.xview_scroll(int(event.delta/40), 'units'))
 
         ''' Selection block, type of files and action to be performed '''
-        Rd_opt1 = Radiobutton(self, text = "Folders", var = self.d_type, value = 0, justify = LEFT, bd = 2, **self.style_opts)
+        Rd_opt1 = Radiobutton(self, text = "Folders", var = self.d_type, value = 0, justify = LEFT, bd = 2, **style_opts)
         Rd_opt1.grid(row = 4, column = 0, padx = 15, pady = 7, ipadx = 1, ipady = 5, sticky = W)
-        Rd_opt2 = Radiobutton(self, text = "Files", var = self.d_type, value = 1, justify = LEFT, bd = 2, **self.style_opts)
+        Rd_opt2 = Radiobutton(self, text = "Files", var = self.d_type, value = 1, justify = LEFT, bd = 2, **style_opts)
         Rd_opt2.grid(row = 4, column = 0, padx = 15, pady = 7, ipadx = 1, ipady = 5, sticky = E)
         self.Cb_opt3 = ttk.Combobox(self, values = list(self.dict_options.keys()), background = "#e6e6e6", state = "readonly", width = 18)
         self.Cb_opt3.set(list(self.dict_options.keys())[0])
         self.Cb_opt3.grid(row = 5, column = 0, padx = 10, pady = 5, ipadx = 10, ipady = 5)
 
         ''' Run button '''
-        but_run = Button(self, text = "Run", bd = 3, relief = RAISED, command = self.accept, **self.style_but, width = 5)
+        but_run = Button(self, text = "Run", bd = 3, relief = RAISED, command = self.accept, **style_but, width = 5)
         but_run.grid(row = 6, column = 0, padx = 10, pady = 10, ipadx = 10, ipady = 5)
 
 # UI manual
@@ -111,7 +111,7 @@ class FFE_UI(Tk):
         fr_man.overrideredirect(True)
         fr_man.wm_attributes('-alpha', 0.8)
         fr_man.withdraw()
-        self.fr_lab = Label(fr_man, justify = LEFT, bd = 2, **self.font_man)
+        self.fr_lab = Label(fr_man, justify = LEFT, bd = 2, **font_man)
         self.fr_lab.grid(padx = 1, pady = 1, sticky = W)
         self.ent_path.bind("<Motion>", lambda event : self.show_manual(event, fr_man, [211, 39, 200, 45], text_man1))
         ent_filter.bind("<Motion>", lambda event : self.show_manual(event, fr_man, [211, 39, 220, 45], text_man2))
