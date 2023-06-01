@@ -22,7 +22,7 @@ from FF_utils import App_Explorer
 
 __author__ = 'Juan García Sánchez'
 __title__= 'FF Explorer'
-__rootf__ = os.getcwd()
+__rootf__ = os.path.dirname(__file__)
 __version__ = '1.0'
 __datver__ = '05-2023'
 __pyver__ = '3.11.3'
