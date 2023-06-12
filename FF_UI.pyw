@@ -113,12 +113,12 @@ class FFE_UI(Tk):
         fr_man.withdraw()
         self.fr_lab = Label(fr_man, justify = LEFT, bd = 2, **font_man)
         self.fr_lab.grid(padx = 1, pady = 1, sticky = W)
-        self.ent_path.bind("<Motion>", lambda event : self.show_manual(event, fr_man, [211, 39, 200, 45], text_man1))
-        ent_filter.bind("<Motion>", lambda event : self.show_manual(event, fr_man, [211, 39, 220, 45], text_man2))
-        Rd_opt1.bind("<Motion>", lambda event : self.show_manual(event, fr_man, [90, 30, 115, 30], text_man3))
-        Rd_opt2.bind("<Motion>", lambda event : self.show_manual(event, fr_man, [70, 30, 100, 30], text_man4))
-        self.Cb_opt3.bind("<Motion>", lambda event : self.show_manual(event, fr_man, [200, 30, 165, 45], text_man5))
-        self.Cb_opt3.bind("<<ComboboxSelected>>", lambda event : self.show_manual_action(fr_man, [70, 30, 165, 45], text_man5))
+        self.ent_path.bind("<Motion>", lambda event : self.show_manual(event, fr_man, [self.ent_path, self.fr_lab], text_man1))
+        ent_filter.bind("<Motion>", lambda event : self.show_manual(event, fr_man, [ent_filter, self.fr_lab], text_man2))
+        Rd_opt1.bind("<Motion>", lambda event : self.show_manual(event, fr_man, [Rd_opt1, self.fr_lab], text_man3))
+        Rd_opt2.bind("<Motion>", lambda event : self.show_manual(event, fr_man, [Rd_opt2, self.fr_lab], text_man4))
+        self.Cb_opt3.bind("<Motion>", lambda event : self.show_manual(event, fr_man, [self.Cb_opt3, self.fr_lab], text_man5))
+        self.Cb_opt3.bind("<<ComboboxSelected>>", lambda event : self.show_manual_action(fr_man, [self.Cb_opt3, self.fr_lab], text_man5))
 
 # UI contextual menu
         self.menucontext = Menu(self, tearoff = 0)
@@ -147,40 +147,20 @@ class FFE_UI(Tk):
     ''' Show auxiliar manual widget '''
     def show_manual_action(self, fr, pos, text_man):
         self.fr_lab.config(text = text_man + self.aux_man[self.dict_options[self.Cb_opt3.get()]])
-        match self.dict_options[self.Cb_opt3.get()]:
-            case -1:
-                pass
-            case 0:
-                pass
-            case 1:
-                pos[2], pos[3] = 250, 63
-            case 2:
-                pos[2], pos[3] = 185, 63
-            case 3:
-                pos[2], pos[3] = 285, 78
-        fr.geometry('{}x{}+{}+{}'.format(pos[2], pos[3], self.winfo_pointerx() + 20, self.winfo_pointery() + 20))
+        self.update()
+        fr.geometry('{}x{}+{}+{}'.format(pos[1].winfo_width() + 5, pos[1].winfo_height() + 5, self.winfo_pointerx() + 20, self.winfo_pointery() + 20))
 
 
     ''' Show manual widget '''
     def show_manual(self, e, fr, pos, text_man):
-        if 0 < e.x < pos[0] and 0 < e.y < pos[1]:
+        if 0 < e.x < pos[0].winfo_width() - 5 and 0 < e.y < pos[0].winfo_height() - 5:
             fr.deiconify()
             if str(e.widget) == '.!combobox':
                 self.fr_lab.config(text = text_man + self.aux_man[self.dict_options[self.Cb_opt3.get()]])
-                match self.dict_options[self.Cb_opt3.get()]:
-                    case -1:
-                        pass
-                    case 0:
-                        pass
-                    case 1:
-                        pos[2], pos[3] = 250, 63
-                    case 2:
-                        pos[2], pos[3] = 185, 63
-                    case 3:
-                        pos[2], pos[3] = 285, 78
             else:
                 self.fr_lab.config(text = text_man)
-            fr.geometry('{}x{}+{}+{}'.format(pos[2], pos[3], e.x_root + 20, e.y_root + 20))
+            self.update()
+            fr.geometry('{}x{}+{}+{}'.format(pos[1].winfo_width() + 5, pos[1].winfo_height() + 5, e.x_root + 20, e.y_root + 20))
         else:
             fr.withdraw()
 
