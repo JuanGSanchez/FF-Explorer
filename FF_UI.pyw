@@ -14,7 +14,14 @@ from tkinter import ttk, font, messagebox, filedialog, PhotoImage
 import os
 import gc
 
-from FF_utils import App_Explorer
+from ff_explorer import (
+    EntryKind,
+    list_entries,
+    save_listing,
+    remove_entries,
+    compress_entries,
+    EmptySeedError,
+)
 
 
 
@@ -23,9 +30,9 @@ from FF_utils import App_Explorer
 __author__ = 'Juan García Sánchez'
 __title__= 'FF Explorer'
 __rootf__ = os.path.dirname(__file__)
-__version__ = '1.0'
+__version__ = '1.0.0'
 __datver__ = '05-2023'
-__pyver__ = '3.11.3'
+__pyver__ = '3.11'  # minimum; see pyproject.toml requires-python
 __license__ = 'GPLv3'
 
 
@@ -174,15 +181,76 @@ class FFE_UI(Tk):
     def accept(self):
         if self.source.get() == '*Select path here*':   # Check if path is introduced
             messagebox.showwarning("Warning!", "Source path not added")
-        elif self.Cb_opt3.get() == '*Select action*':   # Check if action is selected
+            return
+        if self.Cb_opt3.get() == '*Select action*':   # Check if action is selected
             messagebox.showwarning("Warning!", "No action selected")
-        else:   # Execute application function
-            token = App_Explorer(self.source.get(), self.d_type.get(), self.dict_options[self.Cb_opt3.get()], self.seed.get())
-            ending = 'saved' if self.dict_options[self.Cb_opt3.get()] == 1 else 'deleted' if self.dict_options[self.Cb_opt3.get()] == 2 else 'compressed'
-            if token:
-                print('  Directory {}.'.format(ending))
-            else:
-                print('  No {} was found, nothing was {}.'.format('file' if self.d_type.get() else 'folder', ending))
+            return
+
+        path = self.source.get()
+        kind = EntryKind(self.d_type.get())
+        seed = self.seed.get()
+        action_code = self.dict_options[self.Cb_opt3.get()]
+        entry_label = 'file' if kind == EntryKind.FILES else 'folder'
+
+        try:
+            if action_code == 1:   # Save list
+                out_path = save_listing(path, kind, seed)
+                entries = list_entries(path, kind, seed)
+                if entries:
+                    print(f'  Directory saved to {out_path}.')
+                else:
+                    print(f'  No {entry_label} was found, nothing was saved.')
+
+            elif action_code == 2:   # Remove list
+                # Dry-run first to get the preview list
+                preview = remove_entries(path, kind, seed, dry_run=True)
+                if not preview.matched:
+                    print(f'  No {entry_label} was found, nothing was deleted.')
+                    return
+                preview_text = '\n'.join(str(p) for p in preview.matched[:20])
+                if len(preview.matched) > 20:
+                    preview_text += f'\n  ... and {len(preview.matched) - 20} more.'
+                confirmed = messagebox.askyesno(
+                    "Confirm removal",
+                    f"About to permanently remove {len(preview.matched)} {entry_label}(s):\n\n"
+                    f"{preview_text}\n\nProceed?"
+                )
+                if confirmed:
+                    report = remove_entries(path, kind, seed, dry_run=False, confirm=True)
+                    print(f'  {len(report.removed)} {entry_label}(s) removed.')
+                    if report.failed:
+                        print(f'  {len(report.failed)} removal(s) failed.')
+                else:
+                    print('  Removal cancelled.')
+
+            elif action_code == 3:   # Compress list
+                # Dry-run first to get the preview list
+                preview = compress_entries(path, kind, seed, dry_run=True)
+                if not preview.matched:
+                    print(f'  No {entry_label} was found, nothing was compressed.')
+                    return
+                preview_text = '\n'.join(str(p) for p in preview.matched[:20])
+                if len(preview.matched) > 20:
+                    preview_text += f'\n  ... and {len(preview.matched) - 20} more.'
+                confirmed = messagebox.askyesno(
+                    "Confirm compression",
+                    f"About to compress {len(preview.matched)} {entry_label}(s):\n\n"
+                    f"{preview_text}\n\nOriginals will be deleted after compression.  Proceed?"
+                )
+                if confirmed:
+                    report = compress_entries(path, kind, seed, dry_run=False, confirm=True)
+                    print(f'  {len(report.archives)} archive(s) created.')
+                    if report.failed:
+                        print(f'  {len(report.failed)} compression/delete(s) failed.')
+                else:
+                    print('  Compression cancelled.')
+
+        except EmptySeedError as exc:
+            messagebox.showwarning("Empty seed", str(exc))
+        except ValueError as exc:
+            messagebox.showwarning("Invalid input", str(exc))
+        except OSError as exc:
+            messagebox.showerror("File system error", str(exc))
 
 
     ''' Exit function '''
@@ -200,5 +268,10 @@ class FFE_UI(Tk):
 
 # ================= UI execution ================
 
-if __name__ == '__main__':
+def main() -> None:
+    """Entry point for the gui-scripts console target (pyproject.toml)."""
     FFE_UI()
+
+
+if __name__ == '__main__':
+    main()

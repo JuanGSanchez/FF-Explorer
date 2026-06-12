@@ -31,6 +31,12 @@ MANIFEST
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
+# Re-include the checked-in spec so it is tracked by git
+!packaging/FFExplorer.spec
+# Ignore build outputs; keep the spec and scripts
+packaging/bin/
+packaging/work/
+coverage-report/
 
 # Installer logs
 pip-log.txt
