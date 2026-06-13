@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """PreToolUse hook: block reintroducing the legacy Tkinter/.pyw GUI (regression guard).
 
-FF-Explorer migrated off the legacy Tkinter GUI (the old FF_UI.pyw, slated for removal — FFX-B02)
+FF-Explorer migrated off the legacy Tkinter GUI (FF_UI.pyw, removed — FFX-B02)
 to PySide6 (ff_explorer/gui/); tkinter and .pyw entry points must never reappear.
 Fires on Edit/Write. BLOCKS (exit 2) if the target is a .pyw file OR the new content adds an
 `import tkinter` / `from tkinter ...` anywhere in the repo. Otherwise exits 0.
@@ -35,8 +35,8 @@ def main() -> int:
     if path.endswith(".pyw"):
         sys.stderr.write(
             f"BLOCKED (tkinter-regression-guard): '{path}' is a .pyw file. The legacy Tkinter GUI "
-            "(FF_UI.pyw) was replaced by PySide6 (ff_explorer/gui/) and is slated for removal "
-            "(FFX-B02); .pyw entry points must not return."
+            "(FF_UI.pyw) was replaced by PySide6 (ff_explorer/gui/) and removed (FFX-B02); "
+            ".pyw entry points must not return."
         )
         return 2
 

@@ -3,8 +3,7 @@ FF Explorer — PySide6 main window
 Juan García Sánchez, 2023-2026
 License: GPLv3
 
-Reproduces the full control set and UX flow of the legacy FF_UI.pyw Tkinter
-window on top of the WS-1 pure core (ff_explorer.core).
+PySide6 main window for FF Explorer, built on the pure core (ff_explorer.core).
 
 Controls (1-to-1 mapping with the Tkinter original):
     Root path   — QLineEdit (read-only) + "Browse..." QPushButton
@@ -75,7 +74,7 @@ _LICENSE = "GPLv3"
 
 _PLACEHOLDER_PATH = "*Select path here*"
 
-# Maps display label → action code (mirrors legacy dict_options in FF_UI.pyw)
+# Maps display label → action code (mirrors legacy dict_options)
 _ACTION_LABELS: dict[str, int] = {
     "*Select action*": -1,
     "Save list": 1,
@@ -321,8 +320,7 @@ class MainWindow(QMainWindow):
         """
         Validate inputs and dispatch to the appropriate core function.
 
-        Mirrors the legacy accept() method in FF_UI.pyw with the safety gate
-        preserved:
+        Validate inputs and dispatch to the core, with the safety gate preserved:
           - Destructive ops (Remove / Compress) always call the core with
             dry_run=True first, display the preview list, and only proceed on
             explicit user confirmation.

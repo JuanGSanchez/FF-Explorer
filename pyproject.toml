@@ -4,7 +4,6 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ff-explorer"
-# Version is the single source of truth; FF_UI.pyw reads it via importlib.metadata at runtime.
 version = "1.0.0"
 description = "Files/Folders Explorer: recursively list, save, remove, or compress entries matching a name seed."
 readme = "README.md"
@@ -52,9 +51,6 @@ ff-explorer-mcp = "ff_explorer.api.mcp_server:run_stdio"
 # gui-scripts suppresses the console window on Windows (equivalent to .pyw).
 ff-explorer-gui = "ff_explorer.gui.app:main"
 
-# Legacy Tkinter entry point retained for reference; will be retired once the
-# Qt GUI is validated.  Uncomment to re-enable the old Tkinter window.
-# ff-explorer = "FF_UI:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["ff_explorer"]

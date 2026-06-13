@@ -26,7 +26,7 @@ below own the actual work.
 - **GUI** — `ff_explorer/gui/` (PySide6; ~485-line main window) with a UI-side preview-then-confirm
   dialog (defaults to No). Separate from core; not agent-driven.
 - **Packaging** — `packaging/FFExplorer.spec`, `packaging/build.py` (PyInstaller). Legacy
-  `FF_UI.pyw` (Tkinter) and `FF_utils.py` are slated for removal — do not extend them.
+  `FF_utils.py` (top-level, pre-refactor core) is slated for removal — do not extend it.
 - **Tests** — `tests/test_core.py`, `test_core_extra.py`, `test_service.py`, `test_rest.py`.
 
 ## Invariants (do not break these)

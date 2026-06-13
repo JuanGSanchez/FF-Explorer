@@ -35,12 +35,7 @@ Ordered by severity: CRITICAL → HIGH → MEDIUM → LOW.
 - **Asset capability needed:** edit PyInstaller `.spec` + `build.py`, and edit `pyproject.toml` dependency groups.
 
 ### FFX-B02 — Legacy `FF_UI.pyw` Tkinter zombie GUI left in repo, partially rewired
-- **Severity:** HIGH
-- **Location:** `FF_UI.pyw:12-24`; `pyproject.toml:56-57` (commented `ff-explorer = "FF_UI:main"`)
-- **Root cause:** The Tkinter GUI was superseded by the PySide6 port but never removed. `FF_UI.pyw:12-13` still imports Tkinter while `:17-24` imports the new `ff_explorer` core — a half-rewired, dead/zombie second GUI that bypasses the package layout. It also has no `main()`, so the commented console-script entry would fail if uncommented.
-- **Fix approach:** Delete `FF_UI.pyw` (the Qt GUI in `ff_explorer/gui/` fully replaces it). Remove the commented `ff-explorer = "FF_UI:main"` line in `pyproject.toml`. Verify no remaining import or doc references the old module.
-- **Acceptance criterion:** `FF_UI.pyw` no longer exists; `rg "FF_UI" -n` over the repo returns no source/config reference; the GUI still launches via the package entry point; the suite still passes.
-- **Asset capability needed:** delete a top-level source file + edit `pyproject.toml`, and grep the tree to confirm no dangling references.
+- **Status: CLOSED 2026-06-13** — `FF_UI.pyw` deleted via `git rm`; commented `ff-explorer = "FF_UI:main"` entry removed from `pyproject.toml`; all source/config/doc dangling references purged. PySide6 GUI (`ff_explorer/gui/`) confirmed as full replacement with QToolTip hover-help on every control. Suite still passes.
 
 ### FFX-B03 — Combined ASGI app built by route-list splicing; loses REST middleware/exception handlers, untested
 - **Severity:** MEDIUM

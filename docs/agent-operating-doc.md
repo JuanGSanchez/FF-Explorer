@@ -517,4 +517,3 @@ On a 422 / `isError: true` response:
 - **The packaging build** (`packaging/`) — the PyInstaller executable is a build artifact,
   not an agent-accessible surface. See `packaging/README-packaging.md` for build
   instructions.
-- **The legacy Tkinter entry point** (`FF_UI.pyw`) — not connected to the API layer.
