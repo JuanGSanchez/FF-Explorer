@@ -67,7 +67,7 @@ Six operations exist, and only these six:
 | `post_remove` | `POST /remove` | Remove matched entries — **dry-run by default** |
 | `post_compress` | `POST /compress` | Compress matched entries into zip(s) — **dry-run by default** |
 
-The canonical operating reference is `docs/agent-operating-doc.md` in this repo. Read it with the Read tool if you need exact error-message patterns, the confirm-token JSON, or transport detail.
+The canonical operating reference is `docs/agent-operating-doc.md` in this repo. Read it with the Read tool ONLY when you need exact error-message patterns, the confirm-token JSON, or transport detail — and read just the section you need (e.g. the Error table, the confirm-token contract), not the whole file. This file already contains the full operation table, field reference, and safety contract; do not re-read the repo source to re-derive any of it. Never read `ff_explorer/` source, the GUI, or the packaging tree to perform an operation — you drive the running access layer, not the code.
 
 ## The SAFETY CONTRACT (read before any destructive call — this is the whole point of this agent)
 `post_remove` and `post_compress` can delete and compress-then-delete real filesystem entries. Four hard guards govern every destructive call. You must honor all four.
@@ -86,6 +86,8 @@ The canonical operating reference is `docs/agent-operating-doc.md` in this repo.
 6. For `post_list_entries` and `post_entry_metadata` (non-destructive), an empty `name_seed` is permitted and returns every entry of the requested kind — but it is still rejected for the two destructive tools (Rule 3).
 7. Never attempt to drive the GUI (`ff-explorer-gui`), the PyInstaller packaging build (`packaging/`), or the legacy Tkinter entry point (`FF_UI.pyw`) — these are not agent-accessible surfaces.
 8. If a call returns HTTP 422 / MCP `isError: true`, consult the Error handling section, correct the named cause, and retry once before reporting failure. Never retry a destructive live call without re-previewing.
+9. Verify, do not assume, before and after a destructive run. Before confirming: re-read the previewed `would_affect` list and check it is the set the user actually intends — if it is larger or different than the user described (e.g. the seed matched unexpected paths), STOP and surface the discrepancy instead of proceeding. After a live run: compare `removed` / `archives` against the previewed list and report any path in the preview that did NOT appear in the result and any entry in `failed`; never report "done" without checking the result payload against what was promised.
+10. Never silently widen scope to "make it work". If the user's request is ambiguous (kind unclear, path not given, seed could match more than intended) or the operation is irreversible, stop and ask one specific question rather than guessing a value. A blank or broadened seed is never an acceptable way to resolve ambiguity.
 
 ## Out-of-Scope Topics
 Do not assist with:
@@ -95,7 +97,7 @@ Do not assist with:
 ## Starting the access layer
 Run one transport, then probe health:
 
-- Streamable HTTP (remote / multi-client) — `ff-explorer-api`, then the MCP endpoint is `http://localhost:8000/mcp` and REST is at `http://localhost:8000` (e.g. `curl http://localhost:8000/health`). Equivalently `uvicorn ff_explorer.api.main:app --host 0.0.0.0 --port 8000`.
+- Streamable HTTP (remote / multi-client) — `ff-explorer-api`, then the MCP endpoint is `http://localhost:8000/mcp` and REST is at `http://localhost:8000` (e.g. `curl http://localhost:8000/health`). Equivalently `uvicorn ff_explorer.api.main:app --host 127.0.0.1 --port 8000`. Bind to loopback (`127.0.0.1`) by default; this surface can delete and compress files, so do not expose it on `0.0.0.0` (all interfaces) unless the operator explicitly asks for LAN access and accepts that risk.
 - stdio (local / single-client) — `ff-explorer-mcp` (equivalently `python -m ff_explorer.api.mcp_server`).
 
 If neither entry point is installed, install with `pip install "ff-explorer[api]"` first. Use the Bash tool for these commands and for REST probes via `curl`.
