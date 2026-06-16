@@ -130,3 +130,165 @@ class TestServiceExports:
 
     def test_empty_seed_error_exported(self):
         assert service.EmptySeedError is EmptySeedError
+
+    def test_invalid_regex_error_exported(self):
+        from ff_explorer.core import InvalidRegexError
+        assert service.InvalidRegexError is InvalidRegexError
+
+
+# ===========================================================================
+# Service passthrough — FFX-I01 match_mode + case_sensitive
+# ===========================================================================
+
+class TestServiceListEntriesMatchMode:
+    """Verify service.list_entries forwards match_mode and case_sensitive to core."""
+
+    def test_glob_mode_passthrough(self, svc_tree):
+        results = service.list_entries(str(svc_tree), 1, "*.txt", match_mode="glob")
+        names = {e.path.name for e in results}
+        assert "file_a.txt" in names
+        assert "file_b.log" not in names
+
+    def test_regex_mode_passthrough(self, svc_tree):
+        results = service.list_entries(str(svc_tree), 1, r"^file_a",
+                                       match_mode="regex")
+        names = {e.path.name for e in results}
+        assert names == {"file_a.txt"}
+
+    def test_invalid_regex_raises_through_service(self, svc_tree):
+        from ff_explorer.core import InvalidRegexError
+        with pytest.raises(InvalidRegexError):
+            service.list_entries(str(svc_tree), 1, r"[bad", match_mode="regex")
+
+    def test_invalid_regex_is_value_error_via_service(self, svc_tree):
+        with pytest.raises(ValueError):
+            service.list_entries(str(svc_tree), 1, r"[bad", match_mode="regex")
+
+    def test_case_insensitive_passthrough(self, svc_tree):
+        results = service.list_entries(str(svc_tree), 1, "FILE_C",
+                                       case_sensitive=False)
+        names = {e.path.name for e in results}
+        assert "file_c.txt" in names
+
+
+# ===========================================================================
+# Service passthrough — FFX-I02 structured filters
+# ===========================================================================
+
+@pytest.fixture()
+def sized_svc_tree(tmp_path: Path) -> Path:
+    """Tree with controlled sizes for service filter tests."""
+    T = 1_700_000_000.0
+    import os
+
+    def make(name: Path, content: bytes, mtime: float) -> None:
+        name.write_bytes(content)
+        os.utime(name, (mtime, mtime))
+
+    make(tmp_path / "big.txt",   b"x" * 500, T - 10)
+    make(tmp_path / "small.txt", b"x" * 5,   T - 200)
+    make(tmp_path / "data.log",  b"x" * 50,  T - 100)
+    return tmp_path
+
+
+class TestServiceListEntriesFilters:
+    """Verify service.list_entries forwards structured filter params to core."""
+
+    def test_min_size_passthrough(self, sized_svc_tree):
+        results = service.list_entries(str(sized_svc_tree), 1, "", min_size=50)
+        names = {e.path.name for e in results}
+        assert "big.txt" in names
+        assert "data.log" in names
+        assert "small.txt" not in names
+
+    def test_max_size_passthrough(self, sized_svc_tree):
+        results = service.list_entries(str(sized_svc_tree), 1, "", max_size=50)
+        names = {e.path.name for e in results}
+        assert "small.txt" in names
+        assert "data.log" in names
+        assert "big.txt" not in names
+
+    def test_modified_after_passthrough(self, sized_svc_tree):
+        T = 1_700_000_000.0
+        results = service.list_entries(str(sized_svc_tree), 1, "",
+                                       modified_after=T - 50)
+        names = {e.path.name for e in results}
+        assert "big.txt" in names
+        assert "small.txt" not in names
+        assert "data.log" not in names
+
+    def test_modified_before_passthrough(self, sized_svc_tree):
+        T = 1_700_000_000.0
+        results = service.list_entries(str(sized_svc_tree), 1, "",
+                                       modified_before=T - 50)
+        names = {e.path.name for e in results}
+        assert "small.txt" in names
+        assert "big.txt" not in names
+
+    def test_extensions_passthrough(self, sized_svc_tree):
+        results = service.list_entries(str(sized_svc_tree), 1, "",
+                                       extensions=[".txt"])
+        names = {e.path.name for e in results}
+        assert "big.txt" in names
+        assert "small.txt" in names
+        assert "data.log" not in names
+
+    def test_combined_filters_passthrough(self, sized_svc_tree):
+        T = 1_700_000_000.0
+        results = service.list_entries(str(sized_svc_tree), 1, "",
+                                       min_size=50,
+                                       modified_after=T - 50,
+                                       extensions=[".txt"])
+        names = {e.path.name for e in results}
+        assert names == {"big.txt"}
+
+    def test_no_filters_same_as_baseline(self, sized_svc_tree):
+        baseline = service.list_entries(str(sized_svc_tree), 1, "")
+        with_nones = service.list_entries(str(sized_svc_tree), 1, "",
+                                          min_size=None, max_size=None,
+                                          modified_after=None, modified_before=None,
+                                          extensions=None)
+        assert {e.path for e in baseline} == {e.path for e in with_nones}
+
+
+# ===========================================================================
+# FFX-I04 — service passthrough for respect_ignore / ignore_globs
+# ===========================================================================
+
+class TestServiceIgnorePassthrough:
+    """Verify service.list_entries forwards respect_ignore and ignore_globs to core."""
+
+    @pytest.fixture()
+    def ignore_svc_tree(self, tmp_path: Path) -> Path:
+        """Small tree: root .gitignore ignores *.log; one .log and one .txt file."""
+        (tmp_path / ".gitignore").write_text("*.log\n")
+        (tmp_path / "keep.txt").write_text("keep")
+        (tmp_path / "drop.log").write_text("drop")
+        return tmp_path
+
+    def test_respect_ignore_via_service_excludes_log(self, ignore_svc_tree):
+        """service.list_entries with respect_ignore=True omits .gitignore-matched files."""
+        results = service.list_entries(str(ignore_svc_tree), 1, "",
+                                       respect_ignore=True)
+        names = {e.path.name for e in results}
+        assert "drop.log" not in names
+        assert "keep.txt" in names
+
+    def test_ignore_globs_via_service(self, ignore_svc_tree):
+        """service.list_entries with ignore_globs=["*.txt"] omits .txt files."""
+        results = service.list_entries(str(ignore_svc_tree), 1, "",
+                                       respect_ignore=False,
+                                       ignore_globs=["*.txt"])
+        names = {e.path.name for e in results}
+        assert "keep.txt" not in names
+        assert "drop.log" in names
+
+    def test_service_defaults_unchanged(self, ignore_svc_tree):
+        """With defaults, service output is identical to no-ignore call."""
+        baseline = service.list_entries(str(ignore_svc_tree), 1, "")
+        explicit = service.list_entries(str(ignore_svc_tree), 1, "",
+                                        respect_ignore=False, ignore_globs=None)
+        assert {e.path for e in baseline} == {e.path for e in explicit}
+        # Both must contain the .log file (ignore is OFF)
+        names = {e.path.name for e in baseline}
+        assert "drop.log" in names

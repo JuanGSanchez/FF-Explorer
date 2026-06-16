@@ -1,7 +1,7 @@
 # Instruction: AI Execution Discipline (FF-Explorer)
 
 ## Principles Applied
-Inherited: P1 (sources), P2 (determinism), P3 (decision points), P4 (consistency), P6 (self-contained), P7 (reference hygiene). Custom: none — this instruction operationalizes the anti-programmatic-execution + context-budget + definition-of-done discipline the agents reference by name.
+Inherited: P1 (sources), P2 (determinism), P3 (decision points), P4 (consistency), P6 (self-contained), P7 (reference hygiene), P9 Maximal-Effort Completeness (carry every task, doubt, and investigation to a definitive end and fully cover the item; governs coverage/depth, not verbosity, and never overrides Rule 5 minimal-diff or Rule 10's guarantees — relax only on explicit user scope-down; realized by Rule 11. asset-metaprompting P9 / orchestrator-design P12). Custom: none — this instruction operationalizes the anti-programmatic-execution + context-budget + definition-of-done + maximal-effort discipline the agents reference by name.
 
 Scope: applies to every FF-Explorer in-repo agent that reads, edits, tests, builds, documents, or reviews repo content (core-dev, gui-dev, access-dev, test-author, packaging-builder, docs-writer, reviewer, file-folder-operator). It governs HOW work is executed, not WHAT each agent owns.
 
@@ -28,6 +28,7 @@ Scope: applies to every FF-Explorer in-repo agent that reads, edits, tests, buil
     8. Checkpoint before exhaustion. When context crosses ~70%, write `docs/checkpoint-<agent>-<task>-<YYYYMMDD-HHMMSS>` per the Agent Checkpoint Instruction (capturing position, decisions, findings, acceptance criterion, next step) and resume from it; delete it only on a COMPLETED exit.
     9. Evidence over claims. Report success only with the observed evidence (assertion outcome, exit code, grep result). Instead of inferring success from a description or another agent's summary, cite the check you ran.
     10. Under no circumstances weaken a delivered guarantee to make a task "pass": do not lower `--cov-fail-under`, widen the coverage omit, import GUI/transport into core, add a destructive path without the dry_run+confirm+recycle-bin gate, commit secrets or build artifacts, or run a git mutation.
+    11. Pursue the task to completeness (maximal effort). Resolve every sub-part, doubt, and implied follow-up the acceptance criterion requires; never stop at a partial or bare-minimum pass, and build the solution to fully cover the requirement and be ready to extend — never the bare minimum. This governs coverage and depth, NOT verbosity or scope: it never overrides Rule 5 (smallest change) or Rule 10's guarantees, and adds no unrequested refactors or filler. Relax only when the user explicitly scopes the effort down.
   </rules>
 
   <conditional_rules>
@@ -56,6 +57,6 @@ Scope: applies to every FF-Explorer in-repo agent that reads, edits, tests, buil
 <!--
   SOURCES:
   - User requirement: an ai-execution-discipline instruction baking anti-literal-execution + context-budget + definition-of-done into every FF-Explorer agent.
-  - Repo ground truth: docs/BACKLOG.md (Acceptance criteria), .claude/CLAUDE.md (seven invariants + gate commands), pyproject.toml (--cov-fail-under=90).
+  - Repo ground truth: docs/BACKLOG.md (Acceptance criteria), CLAUDE.md (Operating contract + seven invariants + gate commands), pyproject.toml (--cov-fail-under=90).
   - Agent Checkpoint Instruction (orchestrator system); references/claude.md §INSTRUCTION (XML tags, negative-instruction patterns); templates/claude_instruction.md.
 -->

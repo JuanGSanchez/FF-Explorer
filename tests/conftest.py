@@ -5,8 +5,46 @@ All filesystem work uses tmp_path; no real user files are touched.
 """
 from __future__ import annotations
 
+import os
+import sys
+
 import pytest
 from pathlib import Path
+
+
+# ---------------------------------------------------------------------------
+# Qt / GUI fixtures
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="session")
+def qapp():
+    """
+    Session-scoped QApplication for offscreen GUI smoke tests.
+
+    Uses PySide6 directly — no pytest-qt dependency required.
+    Sets QT_QPA_PLATFORM=offscreen if not already set so the suite can run
+    in headless CI without a display server.
+
+    Yields the QApplication instance; keeps it alive for the entire session.
+    """
+    # Ensure offscreen platform when no display variable is set and the caller
+    # hasn't already set the platform explicitly.
+    if "QT_QPA_PLATFORM" not in os.environ:
+        os.environ["QT_QPA_PLATFORM"] = "offscreen"
+
+    from PySide6.QtWidgets import QApplication
+
+    # QApplication must be a singleton; reuse if one already exists.
+    existing = QApplication.instance()
+    if existing is not None:
+        yield existing
+        return
+
+    app = QApplication(sys.argv[:1])
+    app.setApplicationName("FF Explorer Test")
+    yield app
+    # Do NOT call app.quit() or app.exec() — the fixture just provides the
+    # instance; individual tests are responsible for showing/hiding windows.
 
 
 # ---------------------------------------------------------------------------

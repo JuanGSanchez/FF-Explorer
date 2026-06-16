@@ -21,24 +21,44 @@ Claude agent asset references.
 7. [Workflow: preview then remove](#workflow-preview-then-remove)
 8. [Workflow: preview then compress](#workflow-preview-then-compress)
 9. [Input/output reference](#inputoutput-reference)
-10. [The confirm-token contract (concrete JSON)](#the-confirm-token-contract-concrete-json)
-11. [Error table](#error-table)
-12. [What the agent does NOT control](#what-the-agent-does-not-control)
+10. [Search filters and options](#search-filters-and-options)
+11. [Presets, duplicates, rename, and indexing](#presets-duplicates-rename-and-indexing)
+12. [The confirm-token contract (concrete JSON)](#the-confirm-token-contract-concrete-json)
+13. [Error table](#error-table)
+14. [What the agent does NOT control](#what-the-agent-does-not-control)
 
 ---
 
 ## What this repo does for agents
 
-FF-Explorer exposes a **filesystem-manipulation service**. An agent uses it to:
+FF-Explorer exposes a **filesystem-manipulation service** with 14 operations across 7 capability areas:
 
-- **List** every folder or file under a root directory whose name contains a substring seed.
-- **Inspect** size, modification time, and type for a single path.
-- **Save** a matched-entry list to a `.txt` index file in the scanned root.
-- **Remove** matched entries, with recycle-bin routing and dry-run preview.
-- **Compress** matched entries into zip archives, then delete the originals, with dry-run
-  preview.
+### Query (non-destructive)
+- **List entries** — match files/folders by name (substring/glob/regex), with optional filters: size range,
+  modification date range, extensions, content search (gated), ignore-file awareness, archive transparency.
+- **Entry metadata** — inspect path, type, size, modification time.
+- **Find duplicates** — group files by content hash; identify removable duplicates.
+- **Largest files** — return top-N files by size across the tree.
 
-All five operations are exposed identically through the REST API and the MCP tool set.
+### Safe write
+- **Save listing** — write matched-entry list to a `.txt` index file in the scanned root.
+
+### Destructive (guarded — dry-run by default, require confirm)
+- **Remove entries** — move to recycle bin (default) or versioned archive; dry-run preview.
+- **Compress entries** — create zip archive(s), then delete originals; dry-run preview.
+- **Rename entries** — batch rename with collision detection, undo file; dry-run preview.
+
+### Presets (automation)
+- **Save preset** — persist a named query/action bundle.
+- **List presets** — enumerate saved presets.
+- **Run preset** — execute a named preset (destructive presets follow the dry-run/confirm gate).
+
+### Indexing (performance opt-in)
+- **Start index** — build in-memory name index + watchdog observer for real-time updates.
+- **Stop index** — drop index and stop observer.
+- **Index status** — query whether a root is currently indexed.
+
+All 14 operations are exposed identically through the REST API and the 15-tool MCP set.
 
 ---
 
@@ -130,17 +150,26 @@ MCP client configuration:
 
 ## Available tools
 
-All six tools are available on both the Streamable HTTP MCP endpoint (`/mcp`) and the
+All 15 tools are available on both the Streamable HTTP MCP endpoint (`/mcp`) and the
 stdio MCP server.
 
-| MCP tool name | REST method | REST route | Description |
-|---------------|-------------|------------|-------------|
-| `health` | `GET` | `/health` | Liveness and version check |
-| `post_list_entries` | `POST` | `/entries` | List matching entries — non-destructive |
-| `post_entry_metadata` | `POST` | `/metadata` | Metadata for a single path |
-| `post_save_listing` | `POST` | `/listing` | Walk and write a `.txt` listing file |
-| `post_remove` | `POST` | `/remove` | Remove matched entries — **dry-run by default** |
-| `post_compress` | `POST` | `/compress` | Compress matched entries into zip(s) — **dry-run by default** |
+| MCP tool name | REST route | Description |
+|---------------|------------|-------------|
+| `health_health_get` | `GET /health` | Liveness and version check |
+| `post_list_entries_entries_post` | `POST /entries` | List matching entries with search/filter options — non-destructive |
+| `post_entry_metadata_metadata_post` | `POST /metadata` | Entry metadata (path, type, size, mtime, exists) |
+| `post_save_listing_listing_post` | `POST /listing` | Write matched entries to a `.txt` listing file |
+| `post_find_duplicates_duplicates_post` | `POST /duplicates` | Find duplicate files by content hash (FFX-I06) |
+| `post_largest_entries_largest_post` | `POST /largest` | Top-N largest files, sorted descending by size (FFX-I11) |
+| `post_remove_remove_post` | `POST /remove` | Remove matched entries — **dry-run by default** |
+| `post_compress_compress_post` | `POST /compress` | Compress matched entries into zip(s) — **dry-run by default** |
+| `post_rename_rename_post` | `POST /rename` | Batch rename matched entries — **dry-run by default** (FFX-I07) |
+| `post_save_preset_presets_save_post` | `POST /presets/save` | Save (upsert) a named preset (FFX-I03) |
+| `post_list_presets_presets_list_post` | `POST /presets/list` | List all stored presets (FFX-I03) |
+| `post_run_preset_presets_run_post` | `POST /presets/run` | Execute a named preset (destructive presets are guarded) (FFX-I03) |
+| `post_start_index_index_start_post` | `POST /index/start` | Build in-memory name index + start watchdog observer (FFX-I10) |
+| `post_stop_index_index_stop_post` | `POST /index/stop` | Stop index + observer for a root (FFX-I10) |
+| `post_index_status_index_status_post` | `POST /index/status` | Query indexing status for a root (FFX-I10) |
 
 ---
 
@@ -375,16 +404,162 @@ Compression layout:
 
 ---
 
+## Search filters and options
+
+`POST /entries` supports advanced search and filtering beyond name matching:
+
+### Match mode
+- `match_mode: "substring"` (default) — current case-aware `in` test.
+- `match_mode: "glob"` — fnmatch-style wildcards (`*.log`, `test_*.py`, etc.).
+- `match_mode: "regex"` — full regex matching; invalid patterns return HTTP 422 / `InvalidRegexError`.
+
+### File metadata filters
+All are optional; all combine with AND logic (name match PLUS all active predicates):
+- `min_size`, `max_size` — bytes range (inclusive). Applies to files; directories always pass.
+- `modified_after`, `modified_before` — epoch float (seconds since Unix epoch). Applies to mtime.
+- `extensions` — list of file extensions to match (case-insensitive; leading dot optional).
+  Example: `[".log", "txt"]`. Applies to files; directories always pass.
+
+### Archive transparency
+- `search_archives: true` — treat ZIP/TAR/GZ/BZ2 files as navigable containers. Results include
+  internal members as read-only paths (e.g., `archive.zip!member/name`). Default: false.
+- Archive-internal paths cannot be passed to destructive operations (remove/compress/rename).
+
+### Content search (grep-inside-files)
+- `content_query: "search_string"` — find files whose contents contain the query (substring or regex).
+- **Gating requirement:** At least one name/type/size pre-filter must be active. Sending
+  `content_query` without `name_seed`, `extensions`, `min_size`, `max_size`, `modified_after`,
+  or `modified_before` returns HTTP 422 / `ContentSearchUngatedError`.
+- `content_max_bytes` — max file size to scan during content search (default: 1 MB).
+  Binaries (detected by null-byte heuristic) are skipped.
+
+### Gitignore/ignore-file awareness
+- `respect_ignore: true` — skip paths matching `.gitignore`, `.ignore`, or custom patterns.
+  Default: false.
+- `ignore_globs: ["pattern1", "pattern2"]` — additional ignore patterns (optional).
+
+---
+
+## Presets, duplicates, rename, and indexing
+
+### Presets (FFX-I03)
+Save and reuse query/action bundles:
+
+```json
+// POST /presets/save
+{
+  "name": "my-old-logs",
+  "path": "C:/Users/me/logs",
+  "kind": 1,
+  "name_seed": "old_",
+  "match_mode": "substring",
+  "min_size": 1000000,
+  "operation": "list"  // or "remove" / "compress"
+}
+// → HTTP 204 (no body)
+```
+
+Execute a saved preset:
+
+```json
+// POST /presets/run
+{
+  "name": "my-old-logs",
+  "dry_run": true,      // if operation is "remove" or "compress"
+  "confirm": false      // if operation is "remove" or "compress"
+}
+```
+
+Destructive presets (operation: "remove" or "compress") follow the same `dry_run`/`confirm` gate.
+
+### Find duplicates (FFX-I06)
+Identify files with identical content:
+
+```json
+// POST /duplicates
+{
+  "path": "C:/Users/me/documents",
+  "min_size": 1000,     // only scan files ≥ 1000 bytes
+  "algo": "sha256"      // hash algorithm (default: "sha256")
+}
+// Response: {"groups": [{"hash": "...", "size": 1024, "paths": [...]}, ...], "count": N}
+```
+
+Each group contains 2+ files with the same content. Use `/remove` or `/compress` to deduplicate.
+
+### Batch rename (FFX-I07)
+Rename matched entries with collision detection:
+
+```json
+// POST /rename
+{
+  "path": "C:/Users/me/project",
+  "kind": 1,
+  "name_seed": "old_",
+  "rules": [
+    {"rule_type": "prefix", "prefix": "archive_"},
+    {"rule_type": "find_replace", "find": "old_", "replace": "new_"}
+  ],
+  "dry_run": true,
+  "confirm": false
+}
+// Response includes mapping (old→new names), collisions, undo_file
+```
+
+Live rename creates a reverse-mapping undo file.
+
+### Real-time indexing (FFX-I10)
+Build an in-memory index for instant queries:
+
+```json
+// POST /index/start
+{"path": "C:/Users/me/huge_tree"}
+// → HTTP 200: {"root": "...", "indexed": true}
+```
+
+After indexing starts, queries against this root use the index instead of walking the tree.
+Changes (create/rename/delete) are tracked by the watchdog observer and applied incrementally.
+
+```json
+// POST /index/status
+{"path": "C:/Users/me/huge_tree"}
+// → HTTP 200: {"root": "...", "indexed": true}
+```
+
+```json
+// POST /index/stop
+{"path": "C:/Users/me/huge_tree"}
+// → HTTP 200: {"root": "...", "indexed": false}
+```
+
+---
+
 ## Input/output reference
 
-### Common parameters
+### Common parameters (all routes)
 
 | Field | Type | Required | Default | Notes |
 |-------|------|----------|---------|-------|
 | `path` | string | yes | — | Absolute path to an existing directory. |
+
+### Query parameters (for `/entries` and related query routes)
+
+| Field | Type | Required | Default | Notes |
+|-------|------|----------|---------|-------|
 | `kind` | integer | yes | — | `0` = folders, `1` = files. |
-| `name_seed` | string | yes (destructive) / no (query) | `""` | Substring filter. Blank matches everything (safe for query; rejected for destructive). |
+| `name_seed` | string | no | `""` | Substring/glob/regex filter (depends on `match_mode`). Blank matches everything. |
 | `case_sensitive` | boolean | no | `true` | When `false`, matching lowercases both sides. |
+| `match_mode` | string | no | `"substring"` | `"substring"`, `"glob"`, or `"regex"`. |
+| `min_size` | integer | no | `null` | Minimum file size in bytes (inclusive). Files ≥ `min_size` only. |
+| `max_size` | integer | no | `null` | Maximum file size in bytes (inclusive). Files ≤ `max_size` only. |
+| `modified_after` | float | no | `null` | Epoch float (seconds since Unix epoch). Modified after this timestamp. |
+| `modified_before` | float | no | `null` | Epoch float (seconds since Unix epoch). Modified before this timestamp. |
+| `extensions` | array of string | no | `null` | File extensions to match (e.g., `[".txt", "log"]`). Case-insensitive. Applies to files only. |
+| `respect_ignore` | boolean | no | `false` | When `true`, skip paths matching `.gitignore` / `.ignore`. |
+| `ignore_globs` | array of string | no | `null` | Additional ignore patterns (combined with gitignore if `respect_ignore: true`). |
+| `search_archives` | boolean | no | `false` | When `true`, search inside ZIP/TAR/GZ/BZ2 archives as containers. |
+| `content_query` | string | no | `null` | Grep-inside-files search (requires a pre-filter: `name_seed`, `extensions`, or size bound). |
+| `content_max_bytes` | integer | no | `1048576` | Max file size to scan during content search (1 MB default). |
 
 ### POST /entries — ListEntriesResponse
 
@@ -418,6 +593,13 @@ Compression layout:
 | `removed` | array of string | Paths successfully removed (empty when `dry_run: true`). |
 | `failed` | array of `[path, error_message]` | Removal errors, if any. |
 | `would_affect` | array of string | Same as `matched` (preview alias). |
+| `versioned_to` | string or null | When `versioning: true` and `dry_run: false`, the timestamped version directory (e.g., `<root>/.ffe-versions/YYYYMMDD-HHMMSS`). Null for dry-run or when `versioning: false`. |
+
+**Versioning parameter (FFX-I08):**
+
+| Field | Type | Required | Default | Notes |
+|-------|------|----------|---------|-------|
+| `versioning` | boolean | no | `false` | When `true`, move removed entries to `.ffe-versions/<timestamp>/` instead of recycle bin. Same `dry_run`/`confirm` gate applies. |
 
 ### POST /compress — CompressResponse
 
@@ -429,12 +611,13 @@ Compression layout:
 | `failed` | array of `[path, error_message]` | Compression/deletion errors, if any. |
 | `would_affect` | array of string | Same as `matched` (preview alias). |
 
-### Destructive-only parameters
+### Destructive-only parameters (for `/remove`, `/compress`, `/rename`, `/presets/run`)
 
 | Field | Type | Required | Default | Notes |
 |-------|------|----------|---------|-------|
 | `dry_run` | boolean | no | `true` | `true` = preview only, no filesystem mutation. |
 | `confirm` | boolean | no | `false` | Must be `true` together with `dry_run: false` to actually mutate. |
+| `versioning` | boolean | no | `false` | (remove only) Move to `.ffe-versions/<timestamp>/` instead of recycle bin. |
 
 ---
 
@@ -494,19 +677,26 @@ Compression layout:
 
 ## Error table
 
-| Error condition | HTTP status | MCP `isError` | `detail` shape |
-|----------------|-------------|---------------|----------------|
-| Blank / whitespace `name_seed` on `/remove` or `/compress` | 422 | true | `{"error": "EmptySeedError", "message": "..."}` |
-| `dry_run=false` without `confirm=true` | 422 | true | plain string (ValueError message) |
-| `path` not an existing directory | 422 | true | plain string (ValueError message) |
-| `path` does not exist (for `/metadata`) | 404 | true | plain string (FileNotFoundError message) |
+| Error condition | HTTP status | MCP `isError` | Notes |
+|----------------|-------------|---------------|-------|
+| Blank / whitespace `name_seed` on destructive ops | 422 | true | `EmptySeedError` — destructive ops only |
+| `dry_run=false` without `confirm=true` | 422 | true | ValueError — both flags required simultaneously |
+| `content_query` without pre-filter (name/type/size) | 422 | true | `ContentSearchUngatedError` — performance gate |
+| Invalid regex pattern (with `match_mode: "regex"`) | 422 | true | `InvalidRegexError` — compile failed |
+| `path` not an existing directory (for query/destructive) | 422 | true | ValueError — path validation |
+| `path` does not exist (for `/metadata` / `/index/*`) | 404 | true | FileNotFoundError |
 | `kind` not `0` or `1` | 422 | true | Pydantic validation error |
+| `watchdog` not installed (for `/index/start`) | 422 | true | ImportError → 422 |
+| Preset name not found (for `/presets/run`) | 404 | true | KeyError → 404 |
+| Name collision detected (for `/rename`) | 422 | true | ValueError — returned in `collisions` field, no rename applied |
 
 On a 422 / `isError: true` response:
 
 - Check that `name_seed` is non-empty (use `post_list_entries` first to enumerate candidates).
-- Check that both `dry_run: false` AND `confirm: true` are present for live runs.
+- Check that both `dry_run: false` AND `confirm: true` are present for live destructive runs.
 - Check that `path` is an existing directory.
+- For `content_query`: ensure at least one name/type/size pre-filter is active.
+- For `match_mode: "regex"`: validate the regex pattern with a test tool first.
 
 ---
 

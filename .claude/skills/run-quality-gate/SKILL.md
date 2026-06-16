@@ -82,5 +82,5 @@ External dependencies (must be in the environment): the repo's `[dev,api]` extra
 
 ## Sources
 - User requirement: a deterministic run-quality-gate skill (pytest+coverage+invariant grep) for the FF-Explorer self-maintenance suite.
-- Repo ground truth: pyproject.toml (`--cov-fail-under=90`, omit list), ff_explorer/core.py (purity + destructive gate), `.claude/CLAUDE.md` (invariants).
+- Repo ground truth: pyproject.toml (`--cov-fail-under=90`, omit list), ff_explorer/core.py (purity + destructive gate), `CLAUDE.md` (invariants).
 - references/claude.md §SKILL; templates/claude_skill.md; the `testing` skill (coverage runner pattern).

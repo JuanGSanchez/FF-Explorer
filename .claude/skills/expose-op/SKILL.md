@@ -122,6 +122,6 @@ External dependencies (must be available in the execution environment):
 
 ## Sources
 - `ff_explorer/core.py` (query vs destructive split, EmptySeedError, send2trash route), `ff_explorer/api/{service,rest,mcp_server,main}.py` (shared service, routes, error mapping, `from_fastapi` tool derivation, combined ASGI app).
-- `.claude/CLAUDE.md` (invariants 1, 2, 3, 5), `docs/BACKLOG.md` (FFX-I01/I02/I06, gated I05/I07/I08, FFX-B03 combined-app test), `docs/agent-operating-doc.md` (six-op contract, error table).
+- `CLAUDE.md` (invariants 1, 2, 3, 5), `docs/BACKLOG.md` (FFX-I01/I02/I06, gated I05/I07/I08, FFX-B03 combined-app test), `docs/agent-operating-doc.md` (six-op contract, error table).
 - `.claude/instructions/ai-execution-discipline.md` (gate / stop-and-confirm), `.claude/agents/file-folder-operator.md` (operator op table).
 - references/claude.md §SKILL: frontmatter, description rules, body structure.

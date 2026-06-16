@@ -1,10 +1,11 @@
 # FF-Explorer
 
 FF-Explorer (Files/Folders Explorer) is a Windows-first desktop utility that recursively
-walks a chosen root directory and returns every folder or file whose name contains a
-user-supplied substring ("name seed"). Against that matched list it can **save** a plain-text
-index, **remove** the matched items (via the OS recycle bin), or **compress** them into zip
-archives.
+walks a chosen root directory and returns every folder or file matching a search pattern (substring,
+glob, or regex). It can filter results by size, modification date, extension, and file content.
+Against the matched list it can **save** a plain-text index, **remove** items (via recycle bin or
+versioned archive), **compress** them into zip archives, **rename** them in batch, **find
+duplicates** by content hash, or **index** for real-time updates.
 
 Three surfaces are provided:
 
@@ -71,6 +72,7 @@ This makes remove operations recoverable from the shell.
 
 - Python **3.11** or later (build/CI ceiling: Python **3.13**)
 - Windows primary; POSIX paths work for the core and access layer
+- Core dependencies: `send2trash` (recycle-bin routing), `PySide6` (GUI), `pathspec` (gitignore support), `watchdog` (real-time indexing)
 
 ---
 
@@ -98,7 +100,10 @@ ff-explorer-gui
 ```
 
 Launches the PySide6 desktop window. Choose a root directory, enter a name seed, select
-Folders or Files, pick an action (List / Save / Remove / Compress), and press Run.
+match mode (substring / glob / regex), apply filters (size, date, extensions, content search,
+archives, ignore files), pick an action, and press Run. Preview-then-confirm for destructive ops.
+Actions include: List / Save / Remove (recycle bin or versioned) / Compress / Rename / Find
+Duplicates / Disk Usage View / Create/Load Presets / Index Management.
 
 ### REST + MCP access layer (Streamable HTTP)
 
@@ -110,8 +115,8 @@ ff-explorer-api
 # MCP endpoint:     http://localhost:8000/mcp
 ```
 
-All six REST routes and all six MCP tools are available immediately. The access layer is
-the recommended interface for automation, scripting, and agent-driven workflows.
+All 14 REST routes (query, destructive, presets, index) plus 15 derived MCP tools are available.
+The access layer is the recommended interface for automation, scripting, and agent-driven workflows.
 
 ### MCP stdio transport (agent / Claude Desktop)
 

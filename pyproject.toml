@@ -23,6 +23,12 @@ dependencies = [
     # LGPLv3, compatible with repo GPL-3.0.
     # See docs/research-unit-converter.md F3.2 for LGPL compliance notes.
     "PySide6~=6.11.1",
+    # gitwildmatch ignore-file pattern matching (FFX-I04: respect_ignore walk filter).
+    # pathspec 1.1.1 is the current stable release; MIT licence.
+    "pathspec>=0.12",
+    # Real-time filesystem-event monitoring for the name index (FFX-I10).
+    # watchdog 6.0.0 is installed in the dev environment; bound <7 for stability.
+    "watchdog>=4,<7",
 ]
 
 [project.optional-dependencies]
@@ -36,6 +42,7 @@ dev = [
     "pytest~=9.0.3",
     "pytest-cov~=7.1.0",
     "pyinstaller~=6.20.0",
+    "Pillow>=10,<11",            # FFX-B01: PNG->ICO conversion (packaging/scripts/png_to_ico.py)
 ]
 
 [project.scripts]

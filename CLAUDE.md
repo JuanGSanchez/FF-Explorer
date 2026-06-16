@@ -3,31 +3,81 @@
 Recursive file/folder explorer: lists folders/files whose name contains a substring "name seed"
 under a root, and can Save a listing, Remove (recycle-bin), or Compress (zip then delete) the
 matches. One pure headless core powers a PySide6 GUI, a dual FastAPI (REST) + FastMCP access layer,
-and a PyInstaller build. This file is the always-loaded ground truth; the full architecture/file-map
-orientation lives in `.claude/CLAUDE.md` (read it once when you need the map). The in-repo subagents
-below own the actual work.
+and a PyInstaller build. This file is auto-loaded into every Claude Code session here, so it is the
+always-loaded ground truth and the **Operating contract** below is in force from the first turn — the
+active session acts as the canonical orchestrator and routes work to the in-repo agent suite. It also
+carries the full architecture/file-map orientation, so you do not need to read the whole tree to learn
+the layout; search to the named location for exact code.
+
+## Operating contract (canonical orchestration — active every session)
+This file is auto-loaded into every Claude Code session here, so this contract governs from the first
+turn — the **active session is the canonical orchestrator**; no agent has to be invoked to "switch it
+on." Apply it by default to every request:
+- **Scope first.** Read the relevant invariants below and verify real current state (the backlog is
+  stale by policy) before acting.
+- **Multi-subsystem or multi-step work** → act as orchestrator: decompose into bounded, single-owner
+  tasks; dispatch each to its owning specialist subagent (Task tool) per the AI-asset roster below;
+  sequence by dependency; parallelize only genuinely independent tasks; then gate every applied change
+  through `reviewer` (PASS/FAIL) before reporting done. Do not edit across subsystem boundaries ad hoc
+  — keep the role split.
+- **Single-subsystem work** → dispatch to that one owner (a trivial in-boundary change may be made
+  directly), then gate through `reviewer`.
+- **Runtime/behavior evidence** → drive the live service through `file-folder-operator` under its hard
+  preview-then-confirm contract; never present a self-run filesystem op as proof a change works.
+- **Always** honor the 7 invariants, the coverage gate, and the branch policy (enhancement branch,
+  never `main`/`master`); never commit unless asked.
+- **Default to maximal-effort completeness.** Carry every request, task, doubt, and investigation
+  through to a definitive end, and build solutions that fully cover the requirement and are ready to
+  grow — never the bare minimum — unless the user explicitly relaxes the scope. This governs coverage
+  and depth, not verbosity: it never overrides minimal-diff or economical prose, and adds no
+  unrequested refactors. See `.claude/instructions/ai-execution-discipline.md` Rule 11; a standing
+  user-level SessionStart hook (`$HOME/.claude/hooks/claude-orchestration-contract.py`) reinforces it
+  across sessions.
+- **The `.claude/agents/orchestrator.md` subagent is the dispatchable embodiment of this same
+  contract** — invoke it (`@agent-orchestrator`, or via the Task tool) when you want a dedicated Opus
+  4.8 coordinator or nested delegation (requires Claude Code ≥ v2.1.172). The authority is THIS
+  contract, always active regardless of build; the subagent is one way to run it, not a precondition
+  for it. It replaces the decommissioned generalist `ffe-maintainer`: it coordinates and gates, it
+  does not implement.
+- **Meta-work on the asset system itself** (authoring or redesigning agents, skills, hooks, or this
+  contract) is handled by the top-level session with the asset-metaprompting / orchestrator-design
+  skills — not delegated to the orchestrator subagent, which declares asset design out of scope.
 
 ## Principles Applied
 - P1 Source-of-Truth Grounding — architecture/commands below are verified against the real code
   (`ff_explorer/core.py`, `pyproject.toml`), not assumed; read the named file before acting on it.
 - P5 Context Budget Discipline — target files by search (Grep/Glob), read only the region you need.
 - P6 Self-Containment — invariants, gate/build commands, and agent roles are stated here with
-  explicit paths.
+  explicit paths; no implicit cross-references.
 - P7 Reference Hygiene — every path named here resolves in the tree.
+- P9 Maximal-Effort Completeness — the Operating contract's default: full coverage and definitive
+  follow-through over bare-minimum passes, governing depth not verbosity.
 
-## Architecture (one core, many faces)
+## Architecture (one core, many faces) — search to these, don't bulk-read
 - **Headless core** — `ff_explorer/core.py`: query (`list_entries`, `entry_metadata`,
-  `save_listing`) split from destructive actions (`remove_entries`, `compress_entries`). No
-  tkinter/Qt/PySide6/fastapi/fastmcp imports, ever.
+  `save_listing`, `largest_entries`) split from destructive actions (`remove_entries` incl.
+  `versioning` mode, `compress_entries`). list_entries carries match_mode/case_sensitive,
+  size/date/extension filters, ignore-file awareness, archive transparency, and gated
+  `content_query`. Sibling headless modules: `content_search.py`, `presets.py`, `dedupe.py`,
+  `rename.py`, `index.py` (opt-in watchdog name index). No tkinter/Qt/PySide6/fastapi/fastmcp
+  imports, ever.
 - **Access layer (one shared core, two transports)** — `ff_explorer/api/service.py` (shared
-  wrapper), `rest.py` (FastAPI routes + Pydantic models; `name_seed` min_length=1;
+  wrapper both transports call), `rest.py` (FastAPI routes + Pydantic models; `name_seed` min_length=1;
   EmptySeedError/ValueError→422, FileNotFound→404), `mcp_server.py` (`FastMCP.from_fastapi` derives
-  the MCP tools from the REST routes), `main.py` (combined ASGI app + `run_server`).
-- **GUI** — `ff_explorer/gui/` (PySide6; ~485-line main window) with a UI-side preview-then-confirm
-  dialog (defaults to No). Separate from core; not agent-driven.
-- **Packaging** — `packaging/FFExplorer.spec`, `packaging/build.py` (PyInstaller). Legacy
-  `FF_utils.py` (top-level, pre-refactor core) is slated for removal — do not extend it.
-- **Tests** — `tests/test_core.py`, `test_core_extra.py`, `test_service.py`, `test_rest.py`.
+  the MCP tools from the REST routes — exactly 15 tools, asserted by `tests/test_main.py`),
+  `main.py` (combined ASGI app + `run_server` console entry; coverage-omitted — cover it with an
+  integration test).
+- **GUI** — `ff_explorer/gui/` (`main_window.py` ~1500 lines, `app.py`, `_resources.py`,
+  `theme.py` + `settings_dialog.py` (centralized Light/Dark theming), `treemap_view.py` (disk
+  usage); PySide6) with a UI-side preview-then-confirm dialog (defaults to No). Separate from
+  core; not agent-driven.
+- **Packaging** — `packaging/FFExplorer.spec`, `packaging/build.py`, `packaging/scripts/png_to_ico.py`
+  (PyInstaller).
+- **Tests** — `tests/test_core.py`, `test_core_extra.py`, `test_service.py`, `test_rest.py`,
+  `test_main.py`, `test_gui_smoke.py`, `test_theme.py`, `test_presets.py`, `test_dedupe.py`,
+  `test_rename.py`, `test_versioning.py`, `test_archives.py`, `test_index.py`, `conftest.py`.
+- **Config & work list** — `pyproject.toml` (deps, console scripts, `[tool.pytest.ini_options]`,
+  `[tool.coverage.run]`); `docs/BACKLOG.md` (items `FFX-B01`…`FFX-B11`, `FFX-I01`…`FFX-I11`).
 
 ## Invariants (do not break these)
 1. Headless core: `ff_explorer/core.py` imports no tkinter/PySide6/fastapi/fastmcp.
@@ -53,9 +103,16 @@ below own the actual work.
 ## AI asset suite (single source of truth — use these; don't do their jobs ad hoc)
 
 ### Agents (`.claude/agents/`)
+- **orchestrator** — the dispatchable embodiment of the **Operating contract** above (the canonical
+  orchestration always runs in the active session; this subagent is its invokable form). Plans
+  multi-subsystem work, decomposes it into bounded single-owner tasks, dispatches the specialist
+  agents below as subagents (Task tool), then gates every applied change through reviewer. Coordinates
+  and gates; holds no Edit/Write — never edits files itself. Replaces the decommissioned generalist
+  maintainer. Requires Claude Code ≥ v2.1.172 (nested subagents); else it emits a dispatch plan for the
+  top-level session. Invoke it for a dedicated Opus 4.8 coordinator or nested delegation — it is not a
+  precondition for orchestration.
 - **file-folder-operator** — drives the RUNNING access layer (the six MCP/REST ops) headlessly with
   a hard preview-then-confirm safety contract. Operates; never edits code.
-- **ffe-maintainer** — implements `docs/BACKLOG.md` items end-to-end while preserving the invariants.
 - **core-dev** — headless core (query/destructive split, stat/metadata, predicates, exception types).
 - **gui-dev** — PySide6 GUI; thin client over the core, preview-then-confirm safety dialog.
 - **access-dev** — dual MCP+REST over one shared service; thread params, error mapping, bind, tool-name contract.
@@ -64,8 +121,20 @@ below own the actual work.
 - **docs-writer** — keeps README / operating doc / access docs / agent contracts truthful to code.
 - **reviewer** — read-only correctness + destructive-safety/security PASS/FAIL gate; verifies the 7 invariants. Authors no fix.
 
+Role split: the active session is the canonical orchestrator (per the Operating contract), with the
+orchestrator subagent as its dispatchable form — both COORDINATE (dispatch + gate, never edit);
+file-folder-operator OPERATES the live service; the dev agents EDIT their subsystem; reviewer GATES.
+The roster is split by subsystem: core/gui/access/test/packaging/docs.
+
+Model assignment (per-agent `model:` frontmatter, capability-tiered): **Opus 4.8**
+(`claude-opus-4-8`) — orchestrator, reviewer (coordination + judgment gate). **Sonnet 4.6**
+(`claude-sonnet-4-6`) — core-dev, access-dev, gui-dev, test-author (substantive implementation +
+test correctness). **Haiku 4.5** (`claude-haiku-4-5-20251001`) — docs-writer, packaging-builder
+(well-scoped doc/config edits). file-folder-operator inherits the session model. The `model:` field
+may be overridden by `CLAUDE_CODE_SUBAGENT_MODEL` and is ignored on some Claude Code builds.
+
 ### Instructions (`.claude/instructions/`) — agents reference these, don't restate them
-- **ai-execution-discipline.md** — verify-before-edit, assumption checks, minimal change, stop-and-confirm on irreversible/ambiguous, acceptance-criteria-driven done, context-budget (checkpoint ~70%, Gleaner=5).
+- **ai-execution-discipline.md** — verify-before-edit, assumption checks, minimal change, stop-and-confirm on irreversible/ambiguous, acceptance-criteria-driven done, context-budget (checkpoint ~70%, Gleaner=5), and Rule 11 maximal-effort completeness.
 - **python-repo-conventions.md** — stdlib-first, typing, headless-core purity, deterministic offline tests, no secrets, optional-dep groups.
 
 ### Skills (`.claude/skills/`)
@@ -85,3 +154,4 @@ below own the actual work.
 The authoritative work list is `docs/BACKLOG.md`, referenced by item ID (`FFX-B01`…`FFX-B11`,
 `FFX-I01`…`FFX-I11`). Each item is self-contained with acceptance criteria; backlog line references
 are stale by policy — re-verify locations before editing.
+</content>

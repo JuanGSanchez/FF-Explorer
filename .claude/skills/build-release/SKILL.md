@@ -110,5 +110,5 @@ External dependencies (must be available in the execution environment):
 - git: clean-tree hygiene check.
 
 ## Sources
-- `.claude/CLAUDE.md` (invariants 2, 4, 6; build commands), `docs/BACKLOG.md` (FFX-B01 icon trap, FFX-B04 send2trash skew), `packaging/FFExplorer.spec`, `packaging/build.py` (`ensure_ico`, `--no-icon-convert`), `packaging/scripts/png_to_ico.py`.
+- `CLAUDE.md` (invariants 2, 4, 6; build commands), `docs/BACKLOG.md` (FFX-B01 icon trap, FFX-B04 send2trash skew), `packaging/FFExplorer.spec`, `packaging/build.py` (`ensure_ico`, `--no-icon-convert`), `packaging/scripts/png_to_ico.py`.
 - references/claude.md §SKILL: frontmatter, description rules, body structure.

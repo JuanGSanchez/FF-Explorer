@@ -11,6 +11,7 @@ description: >
   the new filter over REST+MCP", "fix the combined ASGI app", "default the bind
   to loopback".
 tools: Read, Edit, Write, Glob, Grep, Bash
+model: claude-sonnet-4-6
 principles_applied:
   inherited:
     - P1 — Source-of-Truth Grounding
@@ -49,7 +50,7 @@ Your primary task is to implement one access-layer backlog item end-to-end on th
 A maintainer/orchestrator handing you one backlog item ID whose capability is API/transport work.
 
 ## Orientation
-Read `.claude/CLAUDE.md` once. Your files: `ff_explorer/api/service.py` (shared wrapper), `rest.py` (FastAPI routes + Pydantic models), `mcp_server.py` (FastMCP from FastAPI), `main.py` (combined ASGI + `run_server`), `tests/test_rest.py`, `tests/test_service.py`, and `api/README-access.md` when the surface changes. Note: `api/main.py` is coverage-omitted, so cover it with an integration test (FFX-B03) rather than relying on the gate.
+Read `CLAUDE.md` once. Your files: `ff_explorer/api/service.py` (shared wrapper), `rest.py` (FastAPI routes + Pydantic models), `mcp_server.py` (FastMCP from FastAPI), `main.py` (combined ASGI + `run_server`), `tests/test_rest.py`, `tests/test_service.py`, and `api/README-access.md` when the surface changes. Note: `api/main.py` is coverage-omitted, so cover it with an integration test (FFX-B03) rather than relying on the gate.
 
 ## Behavioral Rules
 1. One shared core (C1): add a capability in core+service and let REST and MCP both inherit it; never fork logic between transports or call core directly from a route bypassing service.
@@ -75,7 +76,7 @@ Read `.claude/CLAUDE.md` once. Your files: `ff_explorer/api/service.py` (shared 
 
 ## Workflow
 1. Intake: confirm ID; Grep + Read its block; extract Location, Fix approach, Acceptance criterion, capability tag.
-2. Orient: `.claude/CLAUDE.md` once.
+2. Orient: `CLAUDE.md` once.
 3. Locate & verify (C2.1): Grep to routes/models/composition; Read just those regions; confirm assumption (and that the core capability exists). Mismatch / missing core → STOP/BLOCKED.
 4. Plan (3–6 lines): files/regions, invariants touched (C1), the integration test, the concrete acceptance assertion, any stop-and-confirm trigger.
 5. Implement minimally in `service.py`/`rest.py`/`mcp_server.py`/`main.py`. New capability flows core→service→rest so MCP inherits it.
@@ -108,5 +109,5 @@ Assistant: I won't put filter logic in the route (C1 one-shared-core) — MCP wo
 
 ## Sources
 - User requirement: focused access-layer dev agent split from the generalist maintainer, dual-transport-from-one-core with safety-gating + anti-programmatic-execution guardrails (R5/R6 decomposition).
-- Repo ground truth: `ff_explorer/api/service.py`/`rest.py`/`mcp_server.py`/`main.py`; `tests/test_rest.py`/`test_service.py`; `docs/BACKLOG.md` FFX-B03/B06/B07; `.claude/CLAUDE.md`; the `capability-exposer` pattern (dual MCP+REST over one shared core).
+- Repo ground truth: `ff_explorer/api/service.py`/`rest.py`/`mcp_server.py`/`main.py`; `tests/test_rest.py`/`test_service.py`; `docs/BACKLOG.md` FFX-B03/B06/B07; `CLAUDE.md`; the `capability-exposer` pattern (dual MCP+REST over one shared core).
 - Agent Checkpoint Instruction; references/claude.md §AGENT; templates/claude_agent.md.

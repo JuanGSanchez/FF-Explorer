@@ -40,6 +40,9 @@ from pathlib import Path
 # Repo root — one level above the spec file (packaging/ directory)
 REPO_ROOT = str(Path(SPECPATH).parent)
 
+# Icon path — guard against missing .ico (FFX-B01: degrade gracefully if absent)
+ico = Path(REPO_ROOT) / 'Logo FFE.ico'
+
 block_cipher = None
 
 a = Analysis(
@@ -61,9 +64,14 @@ a = Analysis(
         'PySide6.QtWidgets',
         # send2trash: imported via try/except in ff_explorer.core — PyInstaller
         # cannot see through the guard, so must be declared explicitly.
+        # OS-conditional backends (FFX-B04): Windows uses send2trash.win, POSIX
+        # uses send2trash.plat_other, macOS uses send2trash.mac.
         'send2trash',
-        'send2trash.win',
-    ],
+    ] + (
+        ['send2trash.win'] if sys.platform == 'win32' else
+        ['send2trash.mac'] if sys.platform == 'darwin' else
+        ['send2trash.plat_other']
+    ),
     hookspath=[],
     hooksconfig={
         # Instruct the bundled PySide6 hook to collect the platform plugin
@@ -100,15 +108,15 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,                  # FFX-B04: UPX corrupts PySide6 Qt binaries; disabled
     console=False,              # --windowed / --noconsole: no console window
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    # icon: uncomment after running scripts/png_to_ico.py to produce Logo FFE.ico
-    icon=str(Path(REPO_ROOT) / 'Logo FFE.ico'),
+    # icon: guarded to degrade gracefully if .ico is absent (FFX-B01)
+    icon=str(ico) if ico.exists() else None,
 )
 
 coll = COLLECT(
@@ -116,7 +124,7 @@ coll = COLLECT(
     a.binaries,
     a.datas,
     strip=False,
-    upx=True,
+    upx=False,                  # FFX-B04: UPX corrupts PySide6 Qt binaries; disabled
     upx_exclude=[],
     name='FFExplorer',          # output folder: packaging/bin/FFExplorer/
 )
