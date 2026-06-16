@@ -1,0 +1,6 @@
+# FF-Explorer access-layer dependencies
+# Install via: pip install "ff-explorer[api]"
+# (these pins are also declared under [project.optional-dependencies] api in pyproject.toml)
+fastmcp>=3.4,<4
+fastapi>=0.136,<1
+uvicorn>=0.49,<1
