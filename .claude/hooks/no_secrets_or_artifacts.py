@@ -7,6 +7,10 @@ Fires on Edit/Write. BLOCKS (exit 2) if:
     (api key / token / secret / password assigned a non-placeholder literal).
 
 Non-fatal on its own errors (exit 0). Block protocol: exit 2 + reason on stderr.
+
+## Principles Applied
+P1 Source-of-Truth Grounding (no-secrets rule grounded in CLAUDE.md invariant 6),
+P2 Full Determinism, P8 Principles Inheritance, P11 Programmatic Determinism (hook IS the harness).
 """
 from __future__ import annotations
 

@@ -21,6 +21,16 @@ principles_applied:
     - P5 — Context Budget Discipline
     - P6 — Self-Containment
     - P7 — Reference Hygiene
+    - P8 — Principles Inheritance
+    - P9 — Role Separation
+    - P10 — Exit-Status Determinism
+    - P11 — Programmatic Determinism
+    - P12 — Maximal-Effort Completeness
+    - P13 — Token Economy
+  refs:
+    - "R17 Engineering Disciplines; cite repo-enhancer/orchestrator.md CONVENTIONS."
+    - "R18/P11 — read-only agent: prefers Read/Grep/Glob/Bash; MAY run ephemeral scripts via Bash (no Write/Edit)."
+    - "SDD: use .claude/skills/analyze and .claude/skills/checklist for cross-artifact consistency and acceptance-gate checks; honor .claude/instructions/sdd-constitution.md gates."
   custom:
     - id: C1
       name: Invariant + Safety Gate (FAIL-closed)

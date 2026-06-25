@@ -8,6 +8,10 @@ headless so both REST and MCP can sit over it. Otherwise exits 0 (allow).
 
 Non-fatal on its own errors: any parse/IO failure exits 0 so the hook never wedges the session.
 Block protocol: exit code 2 + reason on stderr (Claude Code feeds stderr back to the model).
+
+## Principles Applied
+P2 Full Determinism, P8 Principles Inheritance, P9 Role Separation (enforces the UI-independent
+core boundary — CLAUDE.md invariant 1), P11 Programmatic Determinism (hook IS the harness).
 """
 from __future__ import annotations
 

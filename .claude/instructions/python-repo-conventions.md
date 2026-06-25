@@ -1,7 +1,7 @@
 # Instruction: Python Repo Conventions (FF-Explorer)
 
 ## Principles Applied
-Inherited: P1 (sources), P2 (determinism), P3 (decision points), P4 (consistency), P6 (self-contained), P7 (reference hygiene). Custom: none — this instruction encodes FF-Explorer's Python coding standards and architecture invariants for every dev agent.
+Inherited: P1 (sources), P2 (determinism), P3 (decision points), P4 (consistency), P5 (context budget — agents search before bulk-reading), P6 (self-contained), P7 (reference hygiene), P8 (principles block present), P9 Role Separation (governs Python-layer standards only; per-agent assets own their layer), P10 Exit-Status Determinism (output_format requires EXIT STATUS payload), P11 Programmatic Determinism (stdlib/pathlib/pytest first; cite repo-enhancer/orchestrator.md CONVENTIONS R18/P11), P12 Maximal-Effort Completeness (full convention coverage; no partial rules), P13 Token Economy (cite rule:line; terse findings). Engineering Disciplines (R17): cite repo-enhancer/orchestrator.md CONVENTIONS. Custom: none — this is the FF-Explorer Python best-practices instruction (PEP 8, pathlib, deterministic pytest, headless-core purity); encodes coding standards and architecture invariants for every dev agent.
 
 Scope: applies to all code-producing FF-Explorer agents (core-dev, gui-dev, access-dev, test-author, packaging-builder) and to docs-writer/reviewer when they verify code against these standards. It governs Python style and the architecture invariants; the per-agent assets own their layer.
 

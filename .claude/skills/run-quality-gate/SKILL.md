@@ -15,8 +15,18 @@ principles_applied:
     - P2 — Full Determinism
     - P3 — Systematicity
     - P4 — Consistency
+    - P5 — Context Budget Discipline
     - P6 — Self-Containment
     - P7 — Reference Hygiene
+    - P8 — Principles Inheritance
+    - P9 — Role Separation
+    - P10 — Exit-Status Determinism
+    - P11 — Programmatic Determinism
+    - P12 — Maximal-Effort Completeness
+    - P13 — Token Economy
+  refs:
+    - "R17 Engineering Disciplines; cite repo-enhancer/orchestrator.md CONVENTIONS."
+    - "Execution backend: this skill is invoked by .claude/skills/analyze (cross-artifact consistency) and .claude/skills/checklist (acceptance gate)."
   custom:
     - id: C1
       name: Gate Integrity
