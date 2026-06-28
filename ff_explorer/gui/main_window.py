@@ -109,6 +109,7 @@ from PySide6.QtWidgets import (
 from ff_explorer.gui.theme import build_stylesheet, load_saved_theme
 from ff_explorer.gui.widget_info import info_text, register_info, register_info_text
 from ff_explorer.gui.settings_prefs import load_settings, save_settings
+from ff_explorer.gui.i18n import tr
 
 from ff_explorer import (
     EmptySeedError,
@@ -319,7 +320,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _setup_window(self) -> None:
-        self.setWindowTitle(_TITLE)
+        self.setWindowTitle(tr(_TITLE))
         self.setFixedSize(280, _WIN_HEIGHT_COLLAPSED)
 
         # Centre on the primary screen (replaces Tk winfo_screenwidth math)
@@ -356,7 +357,7 @@ class MainWindow(QMainWindow):
         outer.setSpacing(10)
 
         # ---- Root path section ----
-        path_label = QLabel("Root path")
+        path_label = QLabel(tr("Root path"))
         path_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         path_label.setObjectName("sectionLabel")
         register_info(path_label, "path")
@@ -373,7 +374,7 @@ class MainWindow(QMainWindow):
         # _ClickableLineEdit.mousePressEvent (calls super() then on_click)
         path_row.addWidget(self._path_edit)
 
-        browse_btn = QPushButton("&Browse...")  # SPEC-22: Alt+B mnemonic
+        browse_btn = QPushButton(tr("&Browse..."))  # SPEC-22: Alt+B mnemonic
         browse_btn.setFixedWidth(72)
         register_info(browse_btn, "path_browse")
         browse_btn.clicked.connect(self._browse_path)
@@ -382,7 +383,7 @@ class MainWindow(QMainWindow):
         outer.addLayout(path_row)
 
         # ---- Name seed section ----
-        seed_label = QLabel("Name seed")
+        seed_label = QLabel(tr("Name seed"))
         seed_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         seed_label.setObjectName("sectionLabel")
         register_info(seed_label, "seed")
@@ -396,13 +397,13 @@ class MainWindow(QMainWindow):
         # ---- Mode radio buttons (Folders / Files) ----
         mode_row = QHBoxLayout()
         self._mode_group = QButtonGroup(self)
-        self._radio_folders = QRadioButton("Folders")
+        self._radio_folders = QRadioButton(tr("Folders"))
         self._radio_folders.setChecked(True)  # d_type default = 0 (FOLDERS)
         register_info(self._radio_folders, "mode_folders")
         self._mode_group.addButton(self._radio_folders, EntryKind.FOLDERS.value)
         mode_row.addWidget(self._radio_folders)
 
-        self._radio_files = QRadioButton("Files")
+        self._radio_files = QRadioButton(tr("Files"))
         register_info(self._radio_files, "mode_files")
         self._mode_group.addButton(self._radio_files, EntryKind.FILES.value)
         mode_row.addWidget(self._radio_files)
@@ -417,7 +418,7 @@ class MainWindow(QMainWindow):
         outer.addWidget(self._action_combo)
 
         # ---- Run button ----
-        run_btn = QPushButton("&Run")  # SPEC-22: Alt+R mnemonic
+        run_btn = QPushButton(tr("&Run"))  # SPEC-22: Alt+R mnemonic
         run_btn.setFixedWidth(80)
         run_btn.setObjectName("runButton")
         run_btn.setSizePolicy(
@@ -439,7 +440,7 @@ class MainWindow(QMainWindow):
         run_shortcut.activated.connect(self._run)
 
         # ---- Filters toggle button (FFX-I01 / FFX-I02) ----
-        self._filters_toggle_btn = QPushButton("&Filters ▶")  # SPEC-22: Alt+F mnemonic
+        self._filters_toggle_btn = QPushButton(tr("&Filters ▶"))  # SPEC-22: Alt+F mnemonic
         register_info(self._filters_toggle_btn, "filters_toggle")
         self._filters_toggle_btn.setCheckable(True)
         self._filters_toggle_btn.setChecked(False)
@@ -457,7 +458,7 @@ class MainWindow(QMainWindow):
         outer.addWidget(self._filters_panel)
 
         # ---- Settings button ----
-        settings_btn = QPushButton("⚙ Settings")  # gear unicode
+        settings_btn = QPushButton(tr("⚙ Settings"))  # gear unicode
         settings_btn.setFixedWidth(100)
         register_info(settings_btn, "settings")
         settings_btn.clicked.connect(self._open_settings)
@@ -469,7 +470,7 @@ class MainWindow(QMainWindow):
         outer.addLayout(settings_row)
 
         # ---- Disk usage button (FFX-I11) ----
-        disk_usage_btn = QPushButton("Disk usage")
+        disk_usage_btn = QPushButton(tr("Disk usage"))
         disk_usage_btn.setFixedWidth(100)
         register_info(disk_usage_btn, "disk_usage")
         disk_usage_btn.clicked.connect(self._open_disk_usage)
@@ -481,7 +482,7 @@ class MainWindow(QMainWindow):
         outer.addLayout(disk_usage_row)
 
         # ---- Find duplicates button (FFX-I06) ----
-        dup_btn = QPushButton("Find duplicates")
+        dup_btn = QPushButton(tr("Find duplicates"))
         dup_btn.setFixedWidth(130)
         register_info(dup_btn, "find_duplicates")
         dup_btn.clicked.connect(self._open_find_duplicates)
@@ -493,7 +494,7 @@ class MainWindow(QMainWindow):
         outer.addLayout(dup_row)
 
         # ---- Batch rename button (FFX-I07) ----
-        rename_btn = QPushButton("Batch rename")
+        rename_btn = QPushButton(tr("Batch rename"))
         rename_btn.setFixedWidth(130)
         register_info(rename_btn, "batch_rename")
         rename_btn.clicked.connect(self._open_batch_rename)
@@ -505,13 +506,13 @@ class MainWindow(QMainWindow):
         outer.addLayout(rename_row)
 
         # ---- Preset save/load row (FFX-I03) ----
-        preset_save_btn = QPushButton("Save preset")
+        preset_save_btn = QPushButton(tr("Save preset"))
         preset_save_btn.setFixedWidth(110)
         register_info(preset_save_btn, "preset_save")
         preset_save_btn.clicked.connect(self._save_preset)
         self._preset_save_btn = preset_save_btn  # kept for tab-order wiring below
 
-        preset_load_btn = QPushButton("Load preset")
+        preset_load_btn = QPushButton(tr("Load preset"))
         preset_load_btn.setFixedWidth(110)
         register_info(preset_load_btn, "preset_load")
         preset_load_btn.clicked.connect(self._load_preset)
@@ -525,7 +526,7 @@ class MainWindow(QMainWindow):
         outer.addLayout(preset_row)
 
         # ---- Live index checkbox (FFX-I10) ----
-        self._live_index_check = QCheckBox("Live index this root")
+        self._live_index_check = QCheckBox(tr("Live index this root"))
         self._live_index_check.setChecked(False)
         register_info(self._live_index_check, "live_index")
         self._live_index_check.toggled.connect(self._toggle_live_index)
@@ -575,7 +576,7 @@ class MainWindow(QMainWindow):
         All widgets are styled only via the centralised QSS theme (no
         hard-coded colours) so they adapt to Light/Dark themes automatically.
         """
-        box = QGroupBox("Filters")
+        box = QGroupBox(tr("Filters"))
         layout = QVBoxLayout(box)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
@@ -583,7 +584,7 @@ class MainWindow(QMainWindow):
         # ---- Match mode + case sensitive ----
         match_row = QHBoxLayout()
 
-        match_label = QLabel("Match:")
+        match_label = QLabel(tr("Match:"))
         match_row.addWidget(match_label)
 
         self._match_mode_combo = QComboBox()
@@ -591,7 +592,7 @@ class MainWindow(QMainWindow):
         register_info(self._match_mode_combo, "filter_match_mode")
         match_row.addWidget(self._match_mode_combo)
 
-        self._case_sensitive_check = QCheckBox("Case sensitive")
+        self._case_sensitive_check = QCheckBox(tr("Case sensitive"))
         self._case_sensitive_check.setChecked(True)
         register_info(self._case_sensitive_check, "filter_case_sensitive")
         match_row.addWidget(self._case_sensitive_check)
@@ -601,7 +602,7 @@ class MainWindow(QMainWindow):
         # ---- Size filters (KB; 0 = no bound) ----
         size_row = QHBoxLayout()
 
-        size_label = QLabel("Size (KB):")
+        size_label = QLabel(tr("Size (KB):"))
         size_row.addWidget(size_label)
 
         self._min_size_spin = QSpinBox()
@@ -624,7 +625,7 @@ class MainWindow(QMainWindow):
 
         # ---- Date filters (modified after / before) ----
         after_row = QHBoxLayout()
-        self._date_after_check = QCheckBox("Modified after:")
+        self._date_after_check = QCheckBox(tr("Modified after:"))
         self._date_after_check.setChecked(False)
         register_info(self._date_after_check, "filter_date_after")
         after_row.addWidget(self._date_after_check)
@@ -641,7 +642,7 @@ class MainWindow(QMainWindow):
         self._date_after_check.toggled.connect(self._date_after_edit.setEnabled)
 
         before_row = QHBoxLayout()
-        self._date_before_check = QCheckBox("Modified before:")
+        self._date_before_check = QCheckBox(tr("Modified before:"))
         self._date_before_check.setChecked(False)
         register_info(self._date_before_check, "filter_date_before")
         before_row.addWidget(self._date_before_check)
@@ -659,7 +660,7 @@ class MainWindow(QMainWindow):
 
         # ---- Extensions filter ----
         ext_row = QHBoxLayout()
-        ext_label = QLabel("Extensions:")
+        ext_label = QLabel(tr("Extensions:"))
         ext_row.addWidget(ext_label)
 
         self._extensions_edit = QLineEdit()
@@ -671,7 +672,7 @@ class MainWindow(QMainWindow):
 
         # ---- Content search (FFX-I09) ----
         content_row = QHBoxLayout()
-        content_label = QLabel("Content contains:")
+        content_label = QLabel(tr("Content contains:"))
         content_row.addWidget(content_label)
 
         self._content_query_edit = QLineEdit()
@@ -682,19 +683,19 @@ class MainWindow(QMainWindow):
         layout.addLayout(content_row)
 
         # ---- Archive transparency (FFX-I05) ----
-        self._search_archives_check = QCheckBox("Search inside archives")
+        self._search_archives_check = QCheckBox(tr("Search inside archives"))
         self._search_archives_check.setChecked(False)
         register_info(self._search_archives_check, "filter_search_archives")
         layout.addWidget(self._search_archives_check)
 
         # ---- Ignore-file awareness (FFX-I04) ----
-        self._respect_ignore_check = QCheckBox("Respect .gitignore/.ignore")
+        self._respect_ignore_check = QCheckBox(tr("Respect .gitignore/.ignore"))
         self._respect_ignore_check.setChecked(False)
         register_info(self._respect_ignore_check, "filter_respect_ignore")
         layout.addWidget(self._respect_ignore_check)
 
         ignore_globs_row = QHBoxLayout()
-        ignore_globs_label = QLabel("Extra ignore globs:")
+        ignore_globs_label = QLabel(tr("Extra ignore globs:"))
         ignore_globs_row.addWidget(ignore_globs_label)
 
         self._ignore_globs_edit = QLineEdit()
@@ -705,13 +706,13 @@ class MainWindow(QMainWindow):
         layout.addLayout(ignore_globs_row)
 
         # ---- Versioned delete checkbox (FFX-I08) — shown only for Remove action ----
-        self._versioning_check = QCheckBox("Version (move to .ffe-versions) instead of recycle bin")
+        self._versioning_check = QCheckBox(tr("Version (move to .ffe-versions) instead of recycle bin"))
         self._versioning_check.setChecked(False)
         register_info(self._versioning_check, "filter_versioning")
         layout.addWidget(self._versioning_check)
 
         # ---- Include hidden/system entries (SPEC-17) ----
-        self._include_hidden_check = QCheckBox("Include hidden/system entries")
+        self._include_hidden_check = QCheckBox(tr("Include hidden/system entries"))
         self._include_hidden_check.setChecked(True)  # default True = current behaviour
         register_info(self._include_hidden_check, "filter_include_hidden")
         layout.addWidget(self._include_hidden_check)
@@ -726,7 +727,7 @@ class MainWindow(QMainWindow):
         """Show or hide the filters panel and resize the window accordingly."""
         self._filters_panel.setVisible(checked)
         # SPEC-22: preserve &F mnemonic in both states.
-        self._filters_toggle_btn.setText("&Filters ▼" if checked else "&Filters ▶")
+        self._filters_toggle_btn.setText(tr("&Filters ▼") if checked else tr("&Filters ▶"))
         new_height = _WIN_HEIGHT_EXPANDED if checked else _WIN_HEIGHT_COLLAPSED
         self.setFixedSize(280, new_height)
 
@@ -901,13 +902,13 @@ class MainWindow(QMainWindow):
     def _show_context_menu(self, pos) -> None:
         from PySide6.QtWidgets import QMenu
         menu = QMenu(self)
-        about_action = menu.addAction("About...")
-        exit_action = menu.addAction("Exit")
+        about_action = menu.addAction(tr("About..."))
+        exit_action = menu.addAction(tr("Exit"))
         action = menu.exec(self.mapToGlobal(pos))
         if action is about_action:
             QMessageBox.information(
                 self,
-                "About FF Explorer",
+                tr("About FF Explorer"),
                 f"Author: {_AUTHOR}\nVersion: {_VERSION}\nLicense: {_LICENSE}",
             )
         elif action is exit_action:
@@ -955,7 +956,7 @@ class MainWindow(QMainWindow):
         start = current if (current != _PLACEHOLDER_PATH and Path(current).is_dir()) else ""
         chosen = QFileDialog.getExistingDirectory(
             self,
-            "FF Explorer — root path selection",
+            tr("FF Explorer — root path selection"),
             start,
         )
         if chosen:
@@ -986,13 +987,13 @@ class MainWindow(QMainWindow):
         # --- Input validation (mirrors legacy accept() guards) ---
         path_text = self._path_edit.text()
         if path_text == _PLACEHOLDER_PATH or not path_text.strip():
-            QMessageBox.warning(self, "Warning!", "Source path not added")
+            QMessageBox.warning(self, tr("Warning!"), tr("Source path not added"))
             return
 
         action_label = self._action_combo.currentText()
         action_code = _ACTION_LABELS.get(action_label, -1)
         if action_code == -1:
-            QMessageBox.warning(self, "Warning!", "No action selected")
+            QMessageBox.warning(self, tr("Warning!"), tr("No action selected"))
             return
 
         path = path_text
@@ -1106,25 +1107,26 @@ class MainWindow(QMainWindow):
     def _handle_scan_error(self, exc: object) -> None:
         """Route worker error signal back to the same QMessageBox handlers as before."""
         if isinstance(exc, EmptySeedError):
-            QMessageBox.warning(self, "Empty seed", str(exc))
+            QMessageBox.warning(self, tr("Empty seed"), str(exc))
         elif isinstance(exc, ContentSearchUngatedError):
             QMessageBox.warning(
                 self,
-                "Content search requires a pre-filter",
+                tr("Content search requires a pre-filter"),
                 (
-                    "Content search cannot run without at least one name, extension,\n"
-                    "or size pre-filter — it would scan every file in the tree.\n\n"
-                    "Please set a name seed, extension, or size range first, then\n"
-                    "add the content query.\n\n"
-                    f"Details: {exc}"
+                    tr(
+                        "Content search cannot run without at least one name, extension,\n"
+                        "or size pre-filter — it would scan every file in the tree.\n\n"
+                        "Please set a name seed, extension, or size range first, then\n"
+                        "add the content query.\n\n"
+                    ) + f"Details: {exc}"
                 ),
             )
         elif isinstance(exc, ValueError):
-            QMessageBox.warning(self, "Invalid input", str(exc))
+            QMessageBox.warning(self, tr("Invalid input"), str(exc))
         elif isinstance(exc, OSError):
-            QMessageBox.critical(self, "File system error", str(exc))
+            QMessageBox.critical(self, tr("File system error"), str(exc))
         else:
-            QMessageBox.critical(self, "Unexpected error", str(exc))
+            QMessageBox.critical(self, tr("Unexpected error"), str(exc))
 
     def _on_scan_complete(
         self,
@@ -1249,7 +1251,7 @@ class MainWindow(QMainWindow):
         _COL_TYPE = 2
         _COL_SIZE = 3
         _COL_MODIFIED = 4
-        _HEADERS = ["Name", "Path", "Type", "Size (bytes)", "Modified"]
+        _HEADERS = [tr("Name"), tr("Path"), tr("Type"), tr("Size (bytes)"), tr("Modified")]
 
         table = QTableWidget(len(entries), len(_HEADERS), dlg)
         table.setHorizontalHeaderLabels(_HEADERS)
@@ -1353,12 +1355,12 @@ class MainWindow(QMainWindow):
             return non_archive, excluded
 
         # The "Apply to selected" button (disabled when no rows are selected)
-        apply_selected_btn = QPushButton("Apply to selected (0)")
+        apply_selected_btn = QPushButton(tr("Apply to selected (0)"))
         register_info(apply_selected_btn, "results_apply_selected")
         apply_selected_btn.setEnabled(False)
 
         # The "Apply to all" button (always enabled)
-        apply_all_btn = QPushButton(f"Apply to all ({len(entries)})")
+        apply_all_btn = QPushButton(tr("Apply to all ({n})").replace("{n}", str(len(entries))))
         register_info(apply_all_btn, "results_apply_all")
         apply_all_btn.setEnabled(bool(entries))
 
@@ -1366,7 +1368,9 @@ class MainWindow(QMainWindow):
         def _update_apply_selected_btn() -> None:
             selected_rows = {idx.row() for idx in table.selectedIndexes()}
             n = len(selected_rows)
-            apply_selected_btn.setText(f"Apply to selected ({n})")
+            apply_selected_btn.setText(
+                tr("Apply to selected ({n})").replace("{n}", str(n))
+            )
             apply_selected_btn.setEnabled(n > 0)
 
         table.itemSelectionChanged.connect(_update_apply_selected_btn)
@@ -1376,14 +1380,16 @@ class MainWindow(QMainWindow):
             if excluded > 0:
                 QMessageBox.information(
                     dlg,
-                    "Archive-internal entries excluded",
-                    f"{excluded} archive-internal entry/entries were excluded from the "
-                    "selection — they cannot be acted on destructively or copied/moved.",
+                    tr("Archive-internal entries excluded"),
+                    tr(
+                        "{n} archive-internal entry/entries were excluded from the "
+                        "selection — they cannot be acted on destructively or copied/moved."
+                    ).replace("{n}", str(excluded)),
                 )
             if not paths:
                 # All selected rows were archive-internal; nothing to act on.
                 self._set_status(
-                    "All selected entries are archive-internal; no action was taken."
+                    tr("All selected entries are archive-internal; no action was taken.")
                 )
                 dlg.accept()
                 return
@@ -1410,7 +1416,7 @@ class MainWindow(QMainWindow):
         # Properties / skipped / close row
         btn_row = QHBoxLayout()
 
-        props_btn = QPushButton("Properties")
+        props_btn = QPushButton(tr("Properties"))
         register_info(props_btn, "results_properties")
         props_btn.setEnabled(bool(entries))
 
@@ -1435,7 +1441,7 @@ class MainWindow(QMainWindow):
             btn_row.addWidget(skip_btn)
 
         btn_row.addStretch()
-        close_btn = QPushButton("Close")
+        close_btn = QPushButton(tr("Close"))
         close_btn.clicked.connect(dlg.accept)
         btn_row.addWidget(close_btn)
 
@@ -1464,13 +1470,13 @@ class MainWindow(QMainWindow):
             lbl.setWordWrap(True)
             form.addRow(QLabel(label), lbl)
 
-        _row("Path:", str(path))
+        _row(tr("Path:"), str(path))
 
         if meta:
             import datetime as _dt
-            _row("Type:", str(meta.get("type", "")))
+            _row(tr("Type:"), str(meta.get("type", "")))
             size_bytes = meta.get("size_bytes", 0)
-            _row("Size:", f"{size_bytes:,} bytes")
+            _row(tr("Size:"), f"{size_bytes:,} bytes")
             mtime = meta.get("mtime")
             if mtime is not None:
                 try:
@@ -1480,15 +1486,15 @@ class MainWindow(QMainWindow):
                 except (OSError, OverflowError, ValueError):
                     mtime_str = str(mtime)
             else:
-                mtime_str = "(unavailable)"
-            _row("Modified:", mtime_str)
-            _row("Exists:", str(meta.get("exists", True)))
+                mtime_str = tr("(unavailable)")
+            _row(tr("Modified:"), mtime_str)
+            _row(tr("Exists:"), str(meta.get("exists", True)))
         else:
-            _row("Metadata:", "(unavailable — path may be archive-internal or unreadable)")
+            _row(tr("Metadata:"), tr("(unavailable — path may be archive-internal or unreadable)"))
 
         outer_v = QVBoxLayout()
         outer_v.addLayout(form)
-        ok_btn = QPushButton("OK")
+        ok_btn = QPushButton(tr("OK"))
         ok_btn.clicked.connect(dlg.accept)
         btn_row = QHBoxLayout()
         btn_row.addStretch()
@@ -1516,7 +1522,7 @@ class MainWindow(QMainWindow):
             list_wgt.addItem(f"{se.path}  —  {se.reason}")
         outer.addWidget(list_wgt)
 
-        close_btn = QPushButton("Close")
+        close_btn = QPushButton(tr("Close"))
         close_btn.clicked.connect(dlg.accept)
         btn_row = QHBoxLayout()
         btn_row.addStretch()
@@ -1598,11 +1604,14 @@ class MainWindow(QMainWindow):
         )
         reply = QMessageBox.question(
             self,
-            "Confirm removal",
+            tr("Confirm removal"),
             (
-                f"About to remove "
-                f"{len(display_paths)} {entry_label}(s):{subset_note}\n\n"
-                f"{preview_text}\n\nProceed?{versioning_note}"
+                tr("About to remove {n} {label}(s):{subset_note}\n\n{preview}\n\nProceed?{versioning_note}")
+                .replace("{n}", str(len(display_paths)))
+                .replace("{label}", entry_label)
+                .replace("{subset_note}", subset_note)
+                .replace("{preview}", preview_text)
+                .replace("{versioning_note}", versioning_note)
             ),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
@@ -1659,11 +1668,17 @@ class MainWindow(QMainWindow):
         preview_text = self._build_preview_text(display_paths, entry_label)
         reply = QMessageBox.question(
             self,
-            "Confirm compression",
+            tr("Confirm compression"),
             (
-                f"About to compress {len(display_paths)} {entry_label}(s):{subset_note}\n\n"
-                f"{preview_text}\n\n"
-                "Originals will be deleted after compression.  Proceed?"
+                tr(
+                    "About to compress {n} {label}(s):{subset_note}\n\n"
+                    "{preview}\n\n"
+                    "Originals will be deleted after compression.  Proceed?"
+                )
+                .replace("{n}", str(len(display_paths)))
+                .replace("{label}", entry_label)
+                .replace("{subset_note}", subset_note)
+                .replace("{preview}", preview_text)
             ),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
@@ -1705,11 +1720,11 @@ class MainWindow(QMainWindow):
 
         destination = QFileDialog.getExistingDirectory(
             self,
-            "FF Explorer — destination for Copy",
+            tr("FF Explorer — destination for Copy"),
             "",
         )
         if not destination:
-            self._set_status("Copy cancelled — no destination selected.")
+            self._set_status(tr("Copy cancelled — no destination selected."))
             return
 
         core_kwargs = self._build_core_kwargs()
@@ -1729,11 +1744,18 @@ class MainWindow(QMainWindow):
         preview_text = self._build_preview_text(display_paths, entry_label)
         reply = QMessageBox.question(
             self,
-            "Confirm copy",
+            tr("Confirm copy"),
             (
-                f"About to copy {len(display_paths)} {entry_label}(s){subset_note}\n"
-                f"to: {destination}\n\n"
-                f"{preview_text}\n\nProceed?"
+                tr(
+                    "About to copy {n} {label}(s){subset_note}\n"
+                    "to: {destination}\n\n"
+                    "{preview}\n\nProceed?"
+                )
+                .replace("{n}", str(len(display_paths)))
+                .replace("{label}", entry_label)
+                .replace("{subset_note}", subset_note)
+                .replace("{destination}", destination)
+                .replace("{preview}", preview_text)
             ),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
@@ -1778,11 +1800,11 @@ class MainWindow(QMainWindow):
 
         destination = QFileDialog.getExistingDirectory(
             self,
-            "FF Explorer — destination for Move",
+            tr("FF Explorer — destination for Move"),
             "",
         )
         if not destination:
-            self._set_status("Move cancelled — no destination selected.")
+            self._set_status(tr("Move cancelled — no destination selected."))
             return
 
         core_kwargs = self._build_core_kwargs()
@@ -1802,11 +1824,18 @@ class MainWindow(QMainWindow):
         preview_text = self._build_preview_text(display_paths, entry_label)
         reply = QMessageBox.question(
             self,
-            "Confirm move",
+            tr("Confirm move"),
             (
-                f"About to move {len(display_paths)} {entry_label}(s){subset_note}\n"
-                f"to: {destination}\n\n"
-                f"{preview_text}\n\nProceed?"
+                tr(
+                    "About to move {n} {label}(s){subset_note}\n"
+                    "to: {destination}\n\n"
+                    "{preview}\n\nProceed?"
+                )
+                .replace("{n}", str(len(display_paths)))
+                .replace("{label}", entry_label)
+                .replace("{subset_note}", subset_note)
+                .replace("{destination}", destination)
+                .replace("{preview}", preview_text)
             ),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
@@ -1960,7 +1989,7 @@ class MainWindow(QMainWindow):
         """
         path_text = self._path_edit.text()
         if path_text == _PLACEHOLDER_PATH or not path_text.strip():
-            QMessageBox.warning(self, "Warning!", "Select a root path first.")
+            QMessageBox.warning(self, tr("Warning!"), tr("Select a root path first."))
             return
 
         from ff_explorer.core import largest_entries
@@ -1969,11 +1998,11 @@ class MainWindow(QMainWindow):
         try:
             entries = largest_entries(path_text, top_n=50)
         except (FileNotFoundError, ValueError) as exc:
-            QMessageBox.warning(self, "Disk Usage", str(exc))
+            QMessageBox.warning(self, tr("Disk Usage"), str(exc))
             return
 
         dlg = QDialog(self)
-        dlg.setWindowTitle("Disk Usage — Largest Files")
+        dlg.setWindowTitle(tr("Disk Usage — Largest Files"))
         dlg.resize(680, 520)
         layout = QVBoxLayout(dlg)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -1997,24 +2026,24 @@ class MainWindow(QMainWindow):
         """
         path_text = self._path_edit.text()
         if path_text == _PLACEHOLDER_PATH or not path_text.strip():
-            QMessageBox.warning(self, "Warning!", "Select a root path first.")
+            QMessageBox.warning(self, tr("Warning!"), tr("Select a root path first."))
             return
 
         try:
             groups = find_duplicates(path_text)
         except (ValueError, OSError) as exc:
-            QMessageBox.warning(self, "Find Duplicates", str(exc))
+            QMessageBox.warning(self, tr("Find Duplicates"), str(exc))
             return
 
         dlg = QDialog(self)
-        dlg.setWindowTitle("Find Duplicates")
+        dlg.setWindowTitle(tr("Find Duplicates"))
         dlg.resize(700, 480)
         outer_layout = QVBoxLayout(dlg)
         outer_layout.setContentsMargins(8, 8, 8, 8)
         outer_layout.setSpacing(6)
 
         if not groups:
-            outer_layout.addWidget(QLabel("No duplicate files found."))
+            outer_layout.addWidget(QLabel(tr("No duplicate files found.")))
         else:
             total_wasted = sum(g.size * (len(g.paths) - 1) for g in groups)
             from ff_explorer.gui.treemap_view import _fmt_size
@@ -2054,19 +2083,19 @@ class MainWindow(QMainWindow):
         """
         path_text = self._path_edit.text()
         if path_text == _PLACEHOLDER_PATH or not path_text.strip():
-            QMessageBox.warning(self, "Warning!", "Select a root path first.")
+            QMessageBox.warning(self, tr("Warning!"), tr("Select a root path first."))
             return
 
         seed = self._seed_edit.text()
         if not seed.strip():
             QMessageBox.warning(
-                self, "Batch Rename", "Set a name seed to select files to rename."
+                self, tr("Batch Rename"), tr("Set a name seed to select files to rename.")
             )
             return
 
         # ---- Rule definition dialog ----
         rule_dlg = QDialog(self)
-        rule_dlg.setWindowTitle("Batch Rename — Define Rule")
+        rule_dlg.setWindowTitle(tr("Batch Rename — Define Rule"))
         rule_dlg.resize(420, 180)
         form = QFormLayout()
 
@@ -2075,8 +2104,8 @@ class MainWindow(QMainWindow):
         replace_edit = QLineEdit()
         replace_edit.setPlaceholderText("Replacement text (empty = delete)")
 
-        form.addRow("Find:", find_edit)
-        form.addRow("Replace with:", replace_edit)
+        form.addRow(tr("Find:"), find_edit)
+        form.addRow(tr("Replace with:"), replace_edit)
 
         btns = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -2096,7 +2125,7 @@ class MainWindow(QMainWindow):
         replace_text = replace_edit.text()
 
         if not find_text:
-            QMessageBox.warning(self, "Batch Rename", "Find text must not be empty.")
+            QMessageBox.warning(self, tr("Batch Rename"), tr("Find text must not be empty."))
             return
 
         rule = RenameRule(kind="find_replace", params={"find": find_text, "replace": replace_text})
@@ -2111,22 +2140,24 @@ class MainWindow(QMainWindow):
                 **core_kwargs,
             )
         except EmptySeedError as exc:
-            QMessageBox.warning(self, "Batch Rename", str(exc))
+            QMessageBox.warning(self, tr("Batch Rename"), str(exc))
             return
         except ValueError as exc:
-            QMessageBox.warning(self, "Batch Rename", str(exc))
+            QMessageBox.warning(self, tr("Batch Rename"), str(exc))
             return
 
         if not preview_report.mapping:
-            self._set_status("Batch rename: no matching entries found.")
+            self._set_status(tr("Batch rename: no matching entries found."))
             return
 
         if preview_report.collisions:
             collision_text = "\n".join(preview_report.collisions[:10])
             QMessageBox.warning(
                 self,
-                "Batch Rename — Collision Detected",
-                f"The rename cannot proceed due to collisions:\n\n{collision_text}",
+                tr("Batch Rename — Collision Detected"),
+                tr("The rename cannot proceed due to collisions:\n\n{text}").replace(
+                    "{text}", collision_text
+                ),
             )
             return
 
@@ -2142,16 +2173,17 @@ class MainWindow(QMainWindow):
 
         reply = QMessageBox.question(
             self,
-            "Confirm Batch Rename",
+            tr("Confirm Batch Rename"),
             (
-                f"About to rename {len(preview_report.mapping)} file(s):\n\n"
-                f"{preview_text}\n\nApply?"
+                tr("About to rename {n} file(s):\n\n{preview}\n\nApply?")
+                .replace("{n}", str(len(preview_report.mapping)))
+                .replace("{preview}", preview_text)
             ),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if reply != QMessageBox.StandardButton.Yes:
-            self._set_status("Batch rename cancelled.")
+            self._set_status(tr("Batch rename cancelled."))
             return
 
         try:
@@ -2163,10 +2195,10 @@ class MainWindow(QMainWindow):
                 **core_kwargs,
             )
         except (EmptySeedError, ValueError) as exc:
-            QMessageBox.warning(self, "Batch Rename", str(exc))
+            QMessageBox.warning(self, tr("Batch Rename"), str(exc))
             return
         except OSError as exc:
-            QMessageBox.critical(self, "Batch Rename — File system error", str(exc))
+            QMessageBox.critical(self, tr("Batch Rename — File system error"), str(exc))
             return
 
         msg = f"Batch rename: {len(live_report.renamed)} file(s) renamed."
@@ -2183,7 +2215,7 @@ class MainWindow(QMainWindow):
     def _save_preset(self) -> None:
         """Save the current form state as a named preset (FFX-I03)."""
         name, ok = QInputDialog.getText(
-            self, "Save Preset", "Preset name:"
+            self, tr("Save Preset"), tr("Preset name:")
         )
         if not ok or not name.strip():
             return
@@ -2218,20 +2250,20 @@ class MainWindow(QMainWindow):
             save_preset(preset)
             self._set_status(f"Preset '{name.strip()}' saved.")
         except ValueError as exc:
-            QMessageBox.warning(self, "Save Preset", str(exc))
+            QMessageBox.warning(self, tr("Save Preset"), str(exc))
 
     def _load_preset(self) -> None:
         """Load a saved preset back into the form (FFX-I03)."""
         presets = list_presets()
         if not presets:
             QMessageBox.information(
-                self, "Load Preset", "No saved presets found."
+                self, tr("Load Preset"), tr("No saved presets found.")
             )
             return
 
         names = [p.name for p in presets]
         name, ok = QInputDialog.getItem(
-            self, "Load Preset", "Select preset:", names, 0, False
+            self, tr("Load Preset"), tr("Select preset:"), names, 0, False
         )
         if not ok or not name:
             return
@@ -2239,7 +2271,7 @@ class MainWindow(QMainWindow):
         try:
             preset = get_preset(name)
         except KeyError as exc:
-            QMessageBox.warning(self, "Load Preset", str(exc))
+            QMessageBox.warning(self, tr("Load Preset"), str(exc))
             return
 
         # Apply preset back into form fields
@@ -2306,7 +2338,7 @@ class MainWindow(QMainWindow):
             self._live_index_check.setChecked(False)
             self._live_index_check.blockSignals(False)
             QMessageBox.warning(
-                self, "Live Index", "Select a root path before enabling live indexing."
+                self, tr("Live Index"), tr("Select a root path before enabling live indexing.")
             )
             return
 
@@ -2320,14 +2352,14 @@ class MainWindow(QMainWindow):
                 self._live_index_check.blockSignals(False)
                 QMessageBox.warning(
                     self,
-                    "Live Index — dependency missing",
-                    f"Real-time indexing requires 'watchdog'.\n\n{exc}",
+                    tr("Live Index — dependency missing"),
+                    tr("Real-time indexing requires 'watchdog'.\n\n") + str(exc),
                 )
             except (ValueError, OSError) as exc:
                 self._live_index_check.blockSignals(True)
                 self._live_index_check.setChecked(False)
                 self._live_index_check.blockSignals(False)
-                QMessageBox.warning(self, "Live Index", str(exc))
+                QMessageBox.warning(self, tr("Live Index"), str(exc))
         else:
             try:
                 IndexManager.stop_index(path_text)

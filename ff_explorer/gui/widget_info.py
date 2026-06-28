@@ -51,6 +51,12 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from PySide6.QtWidgets import QWidget
 
+# SPEC-21: import the translation helper so all user-facing strings returned by
+# this registry are routed through QCoreApplication.translate().  When no
+# QTranslator is installed, tr() is a no-op that returns the source string
+# unchanged, preserving full English-UI compatibility.
+from ff_explorer.gui.i18n import tr
+
 
 # ---------------------------------------------------------------------------
 # Registry — single source of truth for all widget help text
@@ -255,10 +261,12 @@ WIDGET_INFO: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 def info_text(key: str) -> str:
-    """Return the help text for *key* from the central registry.
+    """Return the translated help text for *key* from the central registry.
 
-    This is the single access point for registry lookups — wrapping it is the
-    extension seam for a future i18n layer (SPEC-21).
+    SPEC-21: the return value is routed through :func:`~ff_explorer.gui.i18n.tr`
+    so that a QTranslator installed on the QApplication automatically substitutes
+    the source English string.  Without a translator, ``tr()`` returns the source
+    string unchanged — the UI is identical in English.
 
     Parameters
     ----------
@@ -271,7 +279,17 @@ def info_text(key: str) -> str:
         When *key* is not present in the registry.  This is intentional: an
         unknown key means a widget was registered with a typo or missing entry.
     """
-    return WIDGET_INFO[key]
+    return tr(WIDGET_INFO[key])
+
+
+def accessible_name(key: str) -> str:
+    """Return the translated accessible name for *key*.
+
+    SPEC-21: routes WIDGET_ACCESSIBLE_NAMES through the translation layer.
+    Returns an empty string when no accessible name is registered for *key*.
+    """
+    raw = WIDGET_ACCESSIBLE_NAMES.get(key, "")
+    return tr(raw) if raw else ""
 
 
 def register_info(widget: "QWidget", key: str) -> None:
@@ -303,8 +321,8 @@ def register_info(widget: "QWidget", key: str) -> None:
     widget.setAccessibleDescription(text)
     widget.setWhatsThis(text)
     widget.setProperty("_ff_info_key", key)
-    # SPEC-22: set accessible name from the central name registry when present.
-    name = WIDGET_ACCESSIBLE_NAMES.get(key)
+    # SPEC-22 / SPEC-21: set accessible name from the registry, routed through tr().
+    name = accessible_name(key)
     if name:
         widget.setAccessibleName(name)
 
@@ -337,7 +355,7 @@ def register_info_text(widget: "QWidget", text: str, key: str) -> None:
     widget.setAccessibleDescription(text)
     widget.setWhatsThis(text)
     widget.setProperty("_ff_info_key", key)
-    # SPEC-22: set accessible name from the central name registry when present.
-    name = WIDGET_ACCESSIBLE_NAMES.get(key)
+    # SPEC-22 / SPEC-21: set accessible name from the registry, routed through tr().
+    name = accessible_name(key)
     if name:
         widget.setAccessibleName(name)
