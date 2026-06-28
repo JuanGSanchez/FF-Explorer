@@ -312,7 +312,7 @@ class SettingsDialog(QDialog):
     def _refresh_validation(self) -> None:
         violations = validate_theme(self._current_theme)
         if violations:
-            msg = "Colour warnings:\n" + "\n".join(f"  • {v}" for v in violations)
+            msg = tr("Colour warnings:\n") + "\n".join(f"  • {v}" for v in violations)
             self._validation_label.setText(msg)
         else:
             self._validation_label.setText("")

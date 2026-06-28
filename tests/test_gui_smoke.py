@@ -4387,3 +4387,137 @@ class TestAccessibilityAndKeyboardNavigation:
             assert WIDGET_ACCESSIBLE_NAMES[key], (
                 f"WIDGET_ACCESSIBLE_NAMES[{key!r}] must be non-empty"
             )
+
+
+# ---------------------------------------------------------------------------
+# A23 — SPEC-R03: i18n string coverage guard tests
+# ---------------------------------------------------------------------------
+
+class TestI18nStringCoverageGuard:
+    """A23: SPEC-R03 guard tests for i18n string coverage.
+
+    Lint: no bare-string-literal setPlaceholderText/setWindowTitle in any
+    ff_explorer/gui/*.py (all must be wrapped in tr()).
+
+    Pseudo-locale: treemap window title and a representative dialog title
+    render ⟦…⟧-wrapped when the pseudo-locale is active.
+    """
+
+    def test_no_bare_setPlaceholderText_literals_in_gui_package(self):
+        """SPEC-R03 lint: every setPlaceholderText() call in ff_explorer/gui/*.py
+        must have tr(...) as its first argument — no bare string literals.
+
+        Pattern matched: setPlaceholderText( immediately followed by a quote.
+        Allowed: setPlaceholderText(tr( — passes the lint.
+        """
+        import re
+        from pathlib import Path
+
+        gui_dir = Path(__file__).resolve().parent.parent / "ff_explorer" / "gui"
+        # Match the call followed immediately by a quote (bare literal)
+        bare_pattern = re.compile(r"""setPlaceholderText\(\s*["']""")
+
+        offenders: list[str] = []
+        for py_file in gui_dir.glob("*.py"):
+            text = py_file.read_text(encoding="utf-8")
+            for lineno, line in enumerate(text.splitlines(), start=1):
+                if bare_pattern.search(line):
+                    offenders.append(f"{py_file.name}:{lineno}: {line.strip()}")
+
+        assert not offenders, (
+            "Bare setPlaceholderText(\"...\") literals found in the GUI package — "
+            "wrap each in tr() (SPEC-R03):\n"
+            + "\n".join(offenders)
+        )
+
+    def test_no_bare_setWindowTitle_literals_in_gui_package(self):
+        """SPEC-R03 lint: every setWindowTitle() call in ff_explorer/gui/*.py
+        must have tr(...) as its first argument — no bare string literals.
+
+        Pattern matched: setWindowTitle( immediately followed by a quote.
+        Allowed: setWindowTitle(tr( — passes the lint.
+        """
+        import re
+        from pathlib import Path
+
+        gui_dir = Path(__file__).resolve().parent.parent / "ff_explorer" / "gui"
+        bare_pattern = re.compile(r"""setWindowTitle\(\s*["']""")
+
+        offenders: list[str] = []
+        for py_file in gui_dir.glob("*.py"):
+            text = py_file.read_text(encoding="utf-8")
+            for lineno, line in enumerate(text.splitlines(), start=1):
+                if bare_pattern.search(line):
+                    offenders.append(f"{py_file.name}:{lineno}: {line.strip()}")
+
+        assert not offenders, (
+            "Bare setWindowTitle(\"...\") literals found in the GUI package — "
+            "wrap each in tr() (SPEC-R03):\n"
+            + "\n".join(offenders)
+        )
+
+    def test_treemap_window_title_rendered_with_pseudo_locale(self, qapp):
+        """SPEC-R03 pseudo-locale: LargestEntriesView.windowTitle() returns a
+        ⟦…⟧-wrapped string when the pseudo-locale translator is active.
+
+        This confirms tr("Disk Usage — Largest Files") in treemap_view.py is
+        live and actually routed through the Qt translation seam.
+        """
+        from ff_explorer.gui.treemap_view import LargestEntriesView
+        from ff_explorer.gui.i18n import install_pseudo_locale, remove_pseudo_locale
+
+        translator = install_pseudo_locale(qapp)
+        try:
+            view = LargestEntriesView()
+            try:
+                title = view.windowTitle()
+                assert title.startswith("⟦"), (
+                    f"LargestEntriesView.windowTitle() must start with '⟦' under the "
+                    f"pseudo-locale translator (SPEC-R03). Got: {title!r}"
+                )
+                assert title.endswith("⟧"), (
+                    f"LargestEntriesView.windowTitle() must end with '⟧' under the "
+                    f"pseudo-locale translator (SPEC-R03). Got: {title!r}"
+                )
+            finally:
+                view.deleteLater()
+        finally:
+            remove_pseudo_locale(qapp, translator)
+
+    def test_results_dialog_title_rendered_with_pseudo_locale(self, qapp, tmp_path):
+        """SPEC-R03 pseudo-locale: the Results dialog windowTitle starts with ⟦
+        when the pseudo-locale translator is active.
+
+        Calls _show_results_view with one entry and intercepts the dialog's
+        windowTitle() before exec() would block.
+        """
+        from PySide6.QtWidgets import QDialog
+        from ff_explorer.gui.i18n import install_pseudo_locale, remove_pseudo_locale
+        from ff_explorer import MatchEntry, EntryKind
+
+        f = tmp_path / "test.txt"
+        f.write_bytes(b"x")
+        entries = [MatchEntry(path=f, kind=EntryKind.FILES)]
+
+        win = MainWindow()
+        translator = install_pseudo_locale(qapp)
+        try:
+            captured_titles: list[str] = []
+
+            def fake_exec(self_dlg):
+                captured_titles.append(self_dlg.windowTitle())
+                return 0
+
+            with patch.object(QDialog, "exec", fake_exec):
+                win._show_results_view(entries, [], "file")
+
+            assert captured_titles, "Results dialog must have been opened"
+            title = captured_titles[0]
+            assert title.startswith("⟦"), (
+                f"Results dialog windowTitle() must start with '⟦' under the "
+                f"pseudo-locale translator (SPEC-R03). Got: {title!r}"
+            )
+        finally:
+            remove_pseudo_locale(qapp, translator)
+            win.close()
+            win.deleteLater()

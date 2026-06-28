@@ -664,7 +664,7 @@ class MainWindow(QMainWindow):
         ext_row.addWidget(ext_label)
 
         self._extensions_edit = QLineEdit()
-        self._extensions_edit.setPlaceholderText(".txt, .md, .log")
+        self._extensions_edit.setPlaceholderText(tr(".txt, .md, .log"))
         register_info(self._extensions_edit, "filter_extensions")
         ext_row.addWidget(self._extensions_edit)
 
@@ -676,7 +676,7 @@ class MainWindow(QMainWindow):
         content_row.addWidget(content_label)
 
         self._content_query_edit = QLineEdit()
-        self._content_query_edit.setPlaceholderText("grep pattern (requires name/type/size pre-filter)")
+        self._content_query_edit.setPlaceholderText(tr("grep pattern (requires name/type/size pre-filter)"))
         register_info(self._content_query_edit, "filter_content_query")
         content_row.addWidget(self._content_query_edit)
 
@@ -699,7 +699,7 @@ class MainWindow(QMainWindow):
         ignore_globs_row.addWidget(ignore_globs_label)
 
         self._ignore_globs_edit = QLineEdit()
-        self._ignore_globs_edit.setPlaceholderText("*.pyc, __pycache__/")
+        self._ignore_globs_edit.setPlaceholderText(tr("*.pyc, __pycache__/"))
         register_info(self._ignore_globs_edit, "filter_ignore_globs")
         ignore_globs_row.addWidget(self._ignore_globs_edit)
 
@@ -909,7 +909,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 tr("About FF Explorer"),
-                f"Author: {_AUTHOR}\nVersion: {_VERSION}\nLicense: {_LICENSE}",
+                tr("Author: {author}\nVersion: {version}\nLicense: {license}").replace("{author}", _AUTHOR).replace("{version}", _VERSION).replace("{license}", _LICENSE),
             )
         elif action is exit_action:
             self._exit()
@@ -1031,8 +1031,8 @@ class MainWindow(QMainWindow):
 
         # ---- Progress dialog ----
         progress_dlg = QProgressDialog(
-            f"Scanning for {entry_label}(s)…",
-            "Cancel",
+            tr("Scanning for {label}(s)…").replace("{label}", entry_label),
+            tr("Cancel"),
             0,
             0,          # maximum=0 → indeterminate busy bar
             self,
@@ -1048,7 +1048,7 @@ class MainWindow(QMainWindow):
         # ---- Update progress label on each progress emission ----
         def _on_progress(count: int, current: str) -> None:
             progress_dlg.setLabelText(
-                f"Scanning for {entry_label}(s)… {count} found\n{current}"
+                tr("Scanning for {label}(s)… {count} found\n{current}").replace("{label}", entry_label).replace("{count}", str(count)).replace("{current}", current)
             )
 
         # SPEC-15: accumulate the skipped signal payload here so that
@@ -1118,7 +1118,7 @@ class MainWindow(QMainWindow):
                         "or size pre-filter — it would scan every file in the tree.\n\n"
                         "Please set a name seed, extension, or size range first, then\n"
                         "add the content query.\n\n"
-                    ) + f"Details: {exc}"
+                    ) + tr("Details: {details}").replace("{details}", str(exc))
                 ),
             )
         elif isinstance(exc, ValueError):
@@ -1229,8 +1229,8 @@ class MainWindow(QMainWindow):
 
         dlg = QDialog(self)
         dlg.setWindowTitle(
-            f"Results — {len(entries)} {entry_label}(s) found"
-            + (f"  ({len(skipped)} skipped)" if skipped else "")
+            tr("Results — {n} {label}(s) found").replace("{n}", str(len(entries))).replace("{label}", entry_label)
+            + (tr("  ({n} skipped)").replace("{n}", str(len(skipped))) if skipped else "")
         )
         dlg.resize(780, 520)
         outer = QVBoxLayout(dlg)
@@ -1239,9 +1239,9 @@ class MainWindow(QMainWindow):
 
         # Summary label
         summary_lbl = QLabel(
-            f"{len(entries)} {entry_label}(s) found."
-            + (f"  {len(skipped)} path(s) skipped." if skipped else "")
-            + "\n(Ctrl+click or Shift+click to select multiple rows for subset action.)"
+            tr("{n} {label}(s) found.").replace("{n}", str(len(entries))).replace("{label}", entry_label)
+            + (tr("  {n} path(s) skipped.").replace("{n}", str(len(skipped))) if skipped else "")
+            + "\n" + tr("(Ctrl+click or Shift+click to select multiple rows for subset action.)")
         )
         outer.addWidget(summary_lbl)
 
@@ -1459,7 +1459,7 @@ class MainWindow(QMainWindow):
         archive-internal or unreadable) the dialog shows blanks gracefully.
         """
         dlg = QDialog(self)
-        dlg.setWindowTitle(f"Properties — {path}")
+        dlg.setWindowTitle(tr("Properties — {path}").replace("{path}", str(path)))
         dlg.resize(480, 260)
         form = QFormLayout()
         form.setContentsMargins(12, 12, 12, 12)
@@ -1506,7 +1506,7 @@ class MainWindow(QMainWindow):
     def _show_skipped_dialog(self, skipped: "list[SkippedEntry]") -> None:
         """Open a read-only dialog listing skipped paths and reasons (SPEC-15)."""
         dlg = QDialog(self)
-        dlg.setWindowTitle(f"Skipped paths ({len(skipped)})")
+        dlg.setWindowTitle(tr("Skipped paths ({n})").replace("{n}", str(len(skipped))))
         dlg.resize(640, 400)
         outer = QVBoxLayout(dlg)
         outer.setContentsMargins(8, 8, 8, 8)
@@ -1552,7 +1552,7 @@ class MainWindow(QMainWindow):
         if entries:
             self._set_status(f"Directory saved to {out_path}.")
         else:
-            self._set_status(f"No {entry_label} was found — nothing was saved.")
+            self._set_status(tr("No {label} was found — nothing was saved.").replace("{label}", entry_label))
 
     def _do_remove(
         self,
@@ -1579,7 +1579,7 @@ class MainWindow(QMainWindow):
         Passes versioning=True when the versioning checkbox is checked (FFX-I08).
         """
         if not entries:
-            self._set_status(f"No {entry_label} was found — nothing was deleted.")
+            self._set_status(tr("No {label} was found — nothing was deleted.").replace("{label}", entry_label))
             return
 
         core_kwargs = self._build_core_kwargs()
@@ -1598,7 +1598,7 @@ class MainWindow(QMainWindow):
 
         preview_text = self._build_preview_text(display_paths, entry_label)
         versioning_note = (
-            "\n\nFiles will be moved to .ffe-versions/ (recoverable)."
+            tr("\n\nFiles will be moved to .ffe-versions/ (recoverable).")
             if versioning else
             ""
         )
@@ -1621,7 +1621,7 @@ class MainWindow(QMainWindow):
             if only_paths is not None:
                 extra["only_paths"] = only_paths
             report = remove_entries(path, kind, seed, dry_run=False, confirm=True, **core_kwargs, **extra)
-            msg = f"{len(report.removed)} {entry_label}(s) removed."
+            msg = tr("{n} {label}(s) removed.").replace("{n}", str(len(report.removed))).replace("{label}", entry_label)
             if versioning and report.versioned_to:
                 msg += f"  Versions saved to: {report.versioned_to}"
             if report.failed:
@@ -1651,7 +1651,7 @@ class MainWindow(QMainWindow):
         Passes case_sensitive to compress_entries.
         """
         if not entries:
-            self._set_status(f"No {entry_label} was found — nothing was compressed.")
+            self._set_status(tr("No {label} was found — nothing was compressed.").replace("{label}", entry_label))
             return
 
         core_kwargs = self._build_core_kwargs()
@@ -1715,7 +1715,7 @@ class MainWindow(QMainWindow):
         Passes case_sensitive via core_kwargs.
         """
         if not entries:
-            self._set_status(f"No {entry_label} was found — nothing was copied.")
+            self._set_status(tr("No {label} was found — nothing was copied.").replace("{label}", entry_label))
             return
 
         destination = QFileDialog.getExistingDirectory(
@@ -1769,7 +1769,7 @@ class MainWindow(QMainWindow):
                 **core_kwargs,
                 **extra,
             )
-            msg = f"{len(report.transferred)} {entry_label}(s) copied to {destination}."
+            msg = tr("{n} {label}(s) copied to {destination}.").replace("{n}", str(len(report.transferred))).replace("{label}", entry_label).replace("{destination}", str(destination))
             if report.failed:
                 msg += f"  {len(report.failed)} copy failure(s)."
             self._set_status(msg)
@@ -1795,7 +1795,7 @@ class MainWindow(QMainWindow):
         Passes case_sensitive via core_kwargs.
         """
         if not entries:
-            self._set_status(f"No {entry_label} was found — nothing was moved.")
+            self._set_status(tr("No {label} was found — nothing was moved.").replace("{label}", entry_label))
             return
 
         destination = QFileDialog.getExistingDirectory(
@@ -1849,7 +1849,7 @@ class MainWindow(QMainWindow):
                 **core_kwargs,
                 **extra,
             )
-            msg = f"{len(report.transferred)} {entry_label}(s) moved to {destination}."
+            msg = tr("{n} {label}(s) moved to {destination}.").replace("{n}", str(len(report.transferred))).replace("{label}", entry_label).replace("{destination}", str(destination))
             if report.failed:
                 msg += f"  {len(report.failed)} move failure(s)."
             self._set_status(msg)
@@ -1866,7 +1866,7 @@ class MainWindow(QMainWindow):
         lines = [str(p) for p in paths[:limit]]
         text = "\n".join(lines)
         if len(paths) > limit:
-            text += f"\n  ... and {len(paths) - limit} more {entry_label}(s)."
+            text += tr("\n  ... and {n} more {label}(s).").replace("{n}", str(len(paths) - limit)).replace("{label}", entry_label)
         return text
 
     # ------------------------------------------------------------------
@@ -2100,9 +2100,9 @@ class MainWindow(QMainWindow):
         form = QFormLayout()
 
         find_edit = QLineEdit()
-        find_edit.setPlaceholderText("Text to find in filename")
+        find_edit.setPlaceholderText(tr("Text to find in filename"))
         replace_edit = QLineEdit()
-        replace_edit.setPlaceholderText("Replacement text (empty = delete)")
+        replace_edit.setPlaceholderText(tr("Replacement text (empty = delete)"))
 
         form.addRow(tr("Find:"), find_edit)
         form.addRow(tr("Replace with:"), replace_edit)
