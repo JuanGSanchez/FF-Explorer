@@ -13,8 +13,11 @@ No tkinter / PySide6 / fastapi / fastmcp imports — headless-core invariant (C1
 """
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -109,8 +112,9 @@ def file_content_matches(
         # Decode as UTF-8 with replacement for non-UTF-8 text files
         text = raw.decode("utf-8", errors="replace")
 
-    except OSError:
+    except OSError as exc:
         # Permission denied, file disappeared, or other I/O error — no-match
+        logger.debug("content_search: skipping unreadable file %s: %s", p, exc)
         return False
 
     # Apply the match

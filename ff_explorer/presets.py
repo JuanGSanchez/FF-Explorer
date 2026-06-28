@@ -25,11 +25,14 @@ This module imports nothing from tkinter, PySide6, FastAPI, or FastMCP.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "Preset",
@@ -147,7 +150,8 @@ def _load_raw() -> dict[str, dict]:
         if not isinstance(data, dict):
             return {}
         return data
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("presets: failed to load store %s: %s", fp, exc)
         return {}
 
 
@@ -205,9 +209,9 @@ def list_presets() -> list[Preset]:
     for raw in data.values():
         try:
             result.append(_dict_to_preset(raw))
-        except (TypeError, KeyError):
+        except (TypeError, KeyError) as exc:
             # Skip malformed entries rather than crashing.
-            pass
+            logger.warning("presets: skipping malformed entry: %s", exc)
     return result
 
 

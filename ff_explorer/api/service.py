@@ -25,6 +25,7 @@ when available (see ``ff_explorer.core.remove_entries`` docstring).
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Iterable
 
@@ -62,6 +63,8 @@ from ff_explorer.rename import (
     replay_undo as _replay_undo,
 )
 from ff_explorer.index import IndexManager as _IndexManager
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "list_entries",

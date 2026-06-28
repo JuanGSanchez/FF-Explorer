@@ -74,6 +74,7 @@ match_mode parameter:
 from __future__ import annotations
 
 import fnmatch
+import logging
 import os
 import re
 import shutil
@@ -87,6 +88,10 @@ from typing import Iterable, Sequence
 
 import pathspec  # gitwildmatch ignore-file support (FFX-I04; hard dep)
 
+# SPEC-11: structured logging. Module-level logger; the package __init__ attaches
+# a NullHandler so library consumers that never configure logging see no noise.
+logger = logging.getLogger(__name__)
+
 from ff_explorer.content_search import (  # FFX-I09
     CONTENT_MAX_BYTES,
     file_content_matches as _file_content_matches,
@@ -97,6 +102,74 @@ try:
     _SEND2TRASH_AVAILABLE = True
 except ImportError:  # pragma: no cover — send2trash not installed
     _SEND2TRASH_AVAILABLE = False
+
+
+# ---------------------------------------------------------------------------
+# Logging configuration (SPEC-11)
+# ---------------------------------------------------------------------------
+
+def configure_logging(
+    level: int | str | None = None,
+    *,
+    stream=None,
+) -> logging.Logger:
+    """Configure the ``ff_explorer`` package logger (SPEC-11).
+
+    This is an opt-in convenience for applications/CLIs that want FF Explorer's
+    structured log records surfaced.  Libraries should NOT call it; the package
+    already carries a ``NullHandler`` so it is silent by default.
+
+    Parameters
+    ----------
+    level:
+        Logging level as an int (e.g. ``logging.DEBUG``) or a case-insensitive
+        name (``"DEBUG"``, ``"warning"``).  When ``None``, the level is read
+        from the ``FF_EXPLORER_LOG_LEVEL`` environment variable, defaulting to
+        ``WARNING`` when that is unset.
+    stream:
+        Optional stream for the ``StreamHandler``.  When ``None``, ``stderr`` is
+        used.  Additionally, if the ``FF_EXPLORER_LOG_FILE`` environment
+        variable is set, a ``FileHandler`` writing to that path is attached.
+
+    Returns
+    -------
+    logging.Logger
+        The configured ``ff_explorer`` package logger.
+
+    Raises
+    ------
+    ValueError
+        When *level* is an unknown level name.
+    """
+    if level is None:
+        level = os.environ.get("FF_EXPLORER_LOG_LEVEL", "WARNING")
+
+    if isinstance(level, str):
+        resolved = logging.getLevelName(level.upper())
+        if not isinstance(resolved, int):
+            raise ValueError(f"Unknown logging level name: {level!r}")
+        level_value = resolved
+    else:
+        level_value = int(level)
+
+    pkg_logger = logging.getLogger("ff_explorer")
+    pkg_logger.setLevel(level_value)
+
+    formatter = logging.Formatter(
+        "%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
+
+    stream_handler = logging.StreamHandler(stream)
+    stream_handler.setFormatter(formatter)
+    pkg_logger.addHandler(stream_handler)
+
+    log_file = os.environ.get("FF_EXPLORER_LOG_FILE")
+    if log_file:
+        file_handler = logging.FileHandler(log_file, encoding="utf-8")
+        file_handler.setFormatter(formatter)
+        pkg_logger.addHandler(file_handler)
+
+    return pkg_logger
 
 
 # ---------------------------------------------------------------------------
@@ -456,7 +529,8 @@ def _build_ignore_spec(
             candidate = directory / fname
             try:
                 text = candidate.read_text(encoding="utf-8", errors="replace")
-            except OSError:
+            except OSError as exc:
+                logger.debug("Skipping unreadable ignore file %s: %s", candidate, exc)
                 continue
             for line in text.splitlines():
                 stripped = line.strip()
@@ -577,9 +651,9 @@ def _enumerate_archive_members(
 
         # .gz suffix without .tar stem = plain gzip blob; no member enumeration.
 
-    except (zipfile.BadZipFile, tarfile.TarError, OSError, EOFError):
+    except (zipfile.BadZipFile, tarfile.TarError, OSError, EOFError) as exc:
         # Malformed / truncated / unreadable archive — skip gracefully.
-        pass
+        logger.warning("Skipping unreadable archive %s: %s", archive_path, exc)
 
     return results
 
@@ -860,7 +934,8 @@ def list_entries(
                 if needs_stat:
                     try:
                         stat = entry_path.stat()
-                    except OSError:
+                    except OSError as exc:
+                        logger.debug("Skipping unreadable folder %s: %s", entry_path, exc)
                         continue
                     if not _passes_filters(
                         entry_path, False, stat,
@@ -879,7 +954,8 @@ def list_entries(
                 if needs_stat:
                     try:
                         stat = entry_path.stat()
-                    except OSError:
+                    except OSError as exc:
+                        logger.debug("Skipping unreadable file %s: %s", entry_path, exc)
                         continue
                     if not _passes_filters(
                         entry_path, True, stat,
@@ -1128,6 +1204,7 @@ def remove_entries(
                 shutil.move(str(entry_path), str(dest))
                 report.removed.append(entry_path)
             except OSError as exc:
+                logger.warning("Failed to version-move %s: %s", entry_path, exc)
                 report.failed.append((entry_path, str(exc)))
         return report
 
@@ -1143,6 +1220,7 @@ def remove_entries(
                     shutil.rmtree(entry_path, ignore_errors=False)
             report.removed.append(entry_path)
         except OSError as exc:
+            logger.warning("Failed to remove %s: %s", entry_path, exc)
             report.failed.append((entry_path, str(exc)))
 
     return report
@@ -1334,7 +1412,8 @@ def largest_entries(
             entry_path = current / name
             try:
                 size = entry_path.stat().st_size
-            except OSError:
+            except OSError as exc:
+                logger.debug("Skipping unreadable entry %s: %s", entry_path, exc)
                 continue
             sized.append(SizedEntry(path=str(entry_path), size=size))
 
