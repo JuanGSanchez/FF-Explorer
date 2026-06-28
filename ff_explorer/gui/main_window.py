@@ -108,6 +108,7 @@ from PySide6.QtWidgets import (
 
 from ff_explorer.gui.theme import build_stylesheet, load_saved_theme
 from ff_explorer.gui.widget_info import info_text, register_info, register_info_text
+from ff_explorer.gui.settings_prefs import load_settings, save_settings
 
 from ff_explorer import (
     EmptySeedError,
@@ -306,6 +307,8 @@ class MainWindow(QMainWindow):
         self._setup_window()
         self._setup_ui()
         self._setup_context_menu()
+        # SPEC-20: restore persisted preferences (path, mode, action, filters).
+        self._apply_saved_settings()
         # Apply the loaded theme stylesheet globally (after widgets are built).
         QApplication.instance().setStyleSheet(  # type: ignore[union-attr]
             build_stylesheet(self._active_theme)
@@ -370,11 +373,12 @@ class MainWindow(QMainWindow):
         # _ClickableLineEdit.mousePressEvent (calls super() then on_click)
         path_row.addWidget(self._path_edit)
 
-        browse_btn = QPushButton("Browse...")
+        browse_btn = QPushButton("&Browse...")  # SPEC-22: Alt+B mnemonic
         browse_btn.setFixedWidth(72)
         register_info(browse_btn, "path_browse")
         browse_btn.clicked.connect(self._browse_path)
         path_row.addWidget(browse_btn)
+        self._browse_btn = browse_btn  # kept for tab-order wiring below
         outer.addLayout(path_row)
 
         # ---- Name seed section ----
@@ -413,7 +417,7 @@ class MainWindow(QMainWindow):
         outer.addWidget(self._action_combo)
 
         # ---- Run button ----
-        run_btn = QPushButton("Run")
+        run_btn = QPushButton("&Run")  # SPEC-22: Alt+R mnemonic
         run_btn.setFixedWidth(80)
         run_btn.setObjectName("runButton")
         run_btn.setSizePolicy(
@@ -422,6 +426,7 @@ class MainWindow(QMainWindow):
         run_btn.setDefault(True)
         register_info(run_btn, "run")
         run_btn.clicked.connect(self._run)
+        self._run_btn = run_btn  # kept for tab-order wiring below
 
         btn_row = QHBoxLayout()
         btn_row.addStretch()
@@ -429,8 +434,12 @@ class MainWindow(QMainWindow):
         btn_row.addStretch()
         outer.addLayout(btn_row)
 
+        # SPEC-22: Ctrl+Return shortcut — additional to returnPressed on seed_edit.
+        run_shortcut = QShortcut(QKeySequence("Ctrl+Return"), self)
+        run_shortcut.activated.connect(self._run)
+
         # ---- Filters toggle button (FFX-I01 / FFX-I02) ----
-        self._filters_toggle_btn = QPushButton("Filters ▶")
+        self._filters_toggle_btn = QPushButton("&Filters ▶")  # SPEC-22: Alt+F mnemonic
         register_info(self._filters_toggle_btn, "filters_toggle")
         self._filters_toggle_btn.setCheckable(True)
         self._filters_toggle_btn.setChecked(False)
@@ -452,6 +461,7 @@ class MainWindow(QMainWindow):
         settings_btn.setFixedWidth(100)
         register_info(settings_btn, "settings")
         settings_btn.clicked.connect(self._open_settings)
+        self._settings_btn = settings_btn  # kept for tab-order wiring below
 
         settings_row = QHBoxLayout()
         settings_row.addStretch()
@@ -463,6 +473,7 @@ class MainWindow(QMainWindow):
         disk_usage_btn.setFixedWidth(100)
         register_info(disk_usage_btn, "disk_usage")
         disk_usage_btn.clicked.connect(self._open_disk_usage)
+        self._disk_usage_btn = disk_usage_btn  # kept for tab-order wiring below
 
         disk_usage_row = QHBoxLayout()
         disk_usage_row.addStretch()
@@ -474,6 +485,7 @@ class MainWindow(QMainWindow):
         dup_btn.setFixedWidth(130)
         register_info(dup_btn, "find_duplicates")
         dup_btn.clicked.connect(self._open_find_duplicates)
+        self._dup_btn = dup_btn  # kept for tab-order wiring below
 
         dup_row = QHBoxLayout()
         dup_row.addStretch()
@@ -485,6 +497,7 @@ class MainWindow(QMainWindow):
         rename_btn.setFixedWidth(130)
         register_info(rename_btn, "batch_rename")
         rename_btn.clicked.connect(self._open_batch_rename)
+        self._rename_btn = rename_btn  # kept for tab-order wiring below
 
         rename_row = QHBoxLayout()
         rename_row.addStretch()
@@ -496,11 +509,13 @@ class MainWindow(QMainWindow):
         preset_save_btn.setFixedWidth(110)
         register_info(preset_save_btn, "preset_save")
         preset_save_btn.clicked.connect(self._save_preset)
+        self._preset_save_btn = preset_save_btn  # kept for tab-order wiring below
 
         preset_load_btn = QPushButton("Load preset")
         preset_load_btn.setFixedWidth(110)
         register_info(preset_load_btn, "preset_load")
         preset_load_btn.clicked.connect(self._load_preset)
+        self._preset_load_btn = preset_load_btn  # kept for tab-order wiring below
 
         preset_row = QHBoxLayout()
         preset_row.addStretch()
@@ -526,6 +541,26 @@ class MainWindow(QMainWindow):
         outer.addLayout(index_row)
 
         outer.addStretch()
+
+        # SPEC-22: explicit TAB ORDER across primary controls.
+        # Order: path_edit → browse → seed → mode_folders → mode_files →
+        #        action_combo → run_btn → filters_toggle → settings → disk_usage →
+        #        dup_btn → rename_btn → preset_save → preset_load → live_index
+        central.setFocusProxy(self._path_edit)
+        QMainWindow.setTabOrder(self._path_edit,    self._browse_btn)
+        QMainWindow.setTabOrder(self._browse_btn,   self._seed_edit)
+        QMainWindow.setTabOrder(self._seed_edit,    self._radio_folders)
+        QMainWindow.setTabOrder(self._radio_folders, self._radio_files)
+        QMainWindow.setTabOrder(self._radio_files,  self._action_combo)
+        QMainWindow.setTabOrder(self._action_combo, self._run_btn)
+        QMainWindow.setTabOrder(self._run_btn,      self._filters_toggle_btn)
+        QMainWindow.setTabOrder(self._filters_toggle_btn, self._settings_btn)
+        QMainWindow.setTabOrder(self._settings_btn, self._disk_usage_btn)
+        QMainWindow.setTabOrder(self._disk_usage_btn, self._dup_btn)
+        QMainWindow.setTabOrder(self._dup_btn,      self._rename_btn)
+        QMainWindow.setTabOrder(self._rename_btn,   self._preset_save_btn)
+        QMainWindow.setTabOrder(self._preset_save_btn, self._preset_load_btn)
+        QMainWindow.setTabOrder(self._preset_load_btn, self._live_index_check)
 
     def _build_filters_panel(self) -> QGroupBox:
         """Build the collapsible Filters panel (FFX-I01 / FFX-I02).
@@ -690,7 +725,8 @@ class MainWindow(QMainWindow):
     def _toggle_filters(self, checked: bool) -> None:
         """Show or hide the filters panel and resize the window accordingly."""
         self._filters_panel.setVisible(checked)
-        self._filters_toggle_btn.setText("Filters ▼" if checked else "Filters ▶")
+        # SPEC-22: preserve &F mnemonic in both states.
+        self._filters_toggle_btn.setText("&Filters ▼" if checked else "&Filters ▶")
         new_height = _WIN_HEIGHT_EXPANDED if checked else _WIN_HEIGHT_COLLAPSED
         self.setFixedSize(280, new_height)
 
@@ -1805,6 +1841,91 @@ class MainWindow(QMainWindow):
         return text
 
     # ------------------------------------------------------------------
+    # SPEC-20: Persisted preferences — apply / collect / save
+    # ------------------------------------------------------------------
+
+    def _apply_saved_settings(self) -> None:
+        """Restore persisted form preferences from the user config file.
+
+        Called once from ``__init__`` after the UI is built.  Gracefully
+        ignores missing or corrupt files (load_settings always returns a
+        usable dict with defaults).
+
+        Applies:
+        - last_root  → _path_edit text (only when non-empty and valid-looking)
+        - mode       → _radio_folders / _radio_files checked state
+        - action_index → _action_combo current index
+        - match_mode_index → _match_mode_combo current index
+        - case_sensitive → _case_sensitive_check
+        - min_size / max_size → size spinboxes (KB)
+        - respect_ignore → _respect_ignore_check
+        - include_hidden → _include_hidden_check
+        - search_archives → _search_archives_check
+        - versioning → _versioning_check
+        """
+        settings = load_settings()
+
+        last_root = settings.get("last_root", "")
+        if last_root:
+            self._path_edit.setText(last_root)
+
+        mode = settings.get("mode", "folders")
+        if mode == "files":
+            self._radio_files.setChecked(True)
+        else:
+            self._radio_folders.setChecked(True)
+
+        action_index = settings.get("action_index", 0)
+        if 0 <= action_index < self._action_combo.count():
+            self._action_combo.setCurrentIndex(action_index)
+
+        match_mode_index = settings.get("match_mode_index", 0)
+        if 0 <= match_mode_index < self._match_mode_combo.count():
+            self._match_mode_combo.setCurrentIndex(match_mode_index)
+
+        self._case_sensitive_check.setChecked(
+            bool(settings.get("case_sensitive", True))
+        )
+        self._min_size_spin.setValue(int(settings.get("min_size", 0)))
+        self._max_size_spin.setValue(int(settings.get("max_size", 0)))
+        self._respect_ignore_check.setChecked(
+            bool(settings.get("respect_ignore", False))
+        )
+        self._include_hidden_check.setChecked(
+            bool(settings.get("include_hidden", True))
+        )
+        self._search_archives_check.setChecked(
+            bool(settings.get("search_archives", False))
+        )
+        self._versioning_check.setChecked(
+            bool(settings.get("versioning", False))
+        )
+
+    def _collect_current_settings(self) -> dict:
+        """Collect the current form state into a preferences dict (SPEC-20).
+
+        Returns a dict suitable for passing to ``save_settings``.
+        """
+        path_text = self._path_edit.text()
+        last_root = "" if path_text == _PLACEHOLDER_PATH else path_text
+
+        mode = "files" if self._radio_files.isChecked() else "folders"
+
+        return {
+            "last_root": last_root,
+            "mode": mode,
+            "action_index": self._action_combo.currentIndex(),
+            "match_mode_index": self._match_mode_combo.currentIndex(),
+            "case_sensitive": self._case_sensitive_check.isChecked(),
+            "min_size": self._min_size_spin.value(),
+            "max_size": self._max_size_spin.value(),
+            "respect_ignore": self._respect_ignore_check.isChecked(),
+            "include_hidden": self._include_hidden_check.isChecked(),
+            "search_archives": self._search_archives_check.isChecked(),
+            "versioning": self._versioning_check.isChecked(),
+        }
+
+    # ------------------------------------------------------------------
     # Settings / theme
     # ------------------------------------------------------------------
 
@@ -2228,6 +2349,7 @@ class MainWindow(QMainWindow):
 
         Stops the live index observer (FFX-I10) if active so no background
         thread leaks after the window is closed.
+        Persists current form preferences (SPEC-20) on every close.
         """
         # FFX-I10: stop any active live index observer for the current root.
         path_text = self._path_edit.text()
@@ -2241,8 +2363,15 @@ class MainWindow(QMainWindow):
                 IndexManager.stop_index(path_text)
             except Exception:
                 pass  # best-effort; never block close
+
+        # SPEC-20: persist current form preferences on close.
+        try:
+            save_settings(self._collect_current_settings())
+        except Exception:  # noqa: BLE001
+            pass  # best-effort; never block close
+
         gc.collect()
-        event.accept()
+        super().closeEvent(event)
 
     # ------------------------------------------------------------------
     # Keyboard shortcut: Enter → Run  (handled via returnPressed on seed_edit

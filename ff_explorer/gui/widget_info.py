@@ -56,6 +56,51 @@ if TYPE_CHECKING:
 # Registry — single source of truth for all widget help text
 # ---------------------------------------------------------------------------
 
+#: Accessible names for interactive widgets (SPEC-22).
+#: These are concise, screen-reader-friendly labels for each widget.
+#: Keys align with WIDGET_INFO keys where an interactive widget needs a name.
+WIDGET_ACCESSIBLE_NAMES: dict[str, str] = {
+    "path": "Root path",
+    "path_browse": "Browse root path",
+    "seed": "Name seed",
+    "mode_folders": "Search folders",
+    "mode_files": "Search files",
+    "action": "Action selector",
+    "run": "Run search",
+    "filters_toggle": "Toggle filters panel",
+    "settings": "Open settings",
+    "disk_usage": "Show disk usage",
+    "find_duplicates": "Find duplicate files",
+    "batch_rename": "Batch rename files",
+    "preset_save": "Save preset",
+    "preset_load": "Load preset",
+    "live_index": "Live index toggle",
+    "filter_match_mode": "Match mode",
+    "filter_case_sensitive": "Case sensitive",
+    "filter_min_size": "Minimum size in KB",
+    "filter_max_size": "Maximum size in KB",
+    "filter_date_after": "Modified after date enabled",
+    "filter_date_after_edit": "Modified after date",
+    "filter_date_before": "Modified before date enabled",
+    "filter_date_before_edit": "Modified before date",
+    "filter_extensions": "File extensions filter",
+    "filter_content_query": "Content search query",
+    "filter_search_archives": "Search inside archives",
+    "filter_respect_ignore": "Respect ignore files",
+    "filter_ignore_globs": "Extra ignore patterns",
+    "filter_versioning": "Versioned delete",
+    "filter_include_hidden": "Include hidden entries",
+    "results_show_skipped": "Show skipped paths",
+    "results_properties": "Show entry properties",
+    "results_apply_selected": "Apply to selected entries",
+    "results_apply_all": "Apply to all entries",
+    "settings_swatch": "Colour swatch",
+    "settings_reset": "Reset colours",
+    "settings_apply": "Apply theme",
+    "settings_cancel": "Cancel theme changes",
+    "settings_ok": "Apply and save theme",
+}
+
 WIDGET_INFO: dict[str, str] = {
     # ---- Main controls ----
     "path": (
@@ -258,6 +303,10 @@ def register_info(widget: "QWidget", key: str) -> None:
     widget.setAccessibleDescription(text)
     widget.setWhatsThis(text)
     widget.setProperty("_ff_info_key", key)
+    # SPEC-22: set accessible name from the central name registry when present.
+    name = WIDGET_ACCESSIBLE_NAMES.get(key)
+    if name:
+        widget.setAccessibleName(name)
 
 
 def register_info_text(widget: "QWidget", text: str, key: str) -> None:
@@ -288,3 +337,7 @@ def register_info_text(widget: "QWidget", text: str, key: str) -> None:
     widget.setAccessibleDescription(text)
     widget.setWhatsThis(text)
     widget.setProperty("_ff_info_key", key)
+    # SPEC-22: set accessible name from the central name registry when present.
+    name = WIDGET_ACCESSIBLE_NAMES.get(key)
+    if name:
+        widget.setAccessibleName(name)

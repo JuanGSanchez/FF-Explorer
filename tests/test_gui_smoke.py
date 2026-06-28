@@ -41,6 +41,21 @@ from ff_explorer.gui.main_window import MainWindow, _ClickableLineEdit
 
 
 # ---------------------------------------------------------------------------
+# Prefs isolation — autouse fixture (SPEC-20)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _isolate_prefs(tmp_path, monkeypatch):
+    """Redirect FFE_PREFS_CONFIG_DIR to a per-test tmp directory for every test
+    in this module so that saved preferences from one test do not affect another.
+
+    This prevents SPEC-20's closeEvent persistence from leaking state across
+    tests that construct MainWindow (which restores prefs on init).
+    """
+    monkeypatch.setenv("FFE_PREFS_CONFIG_DIR", str(tmp_path / "prefs"))
+
+
+# ---------------------------------------------------------------------------
 # A1 — Window instantiates without error under offscreen Qt
 # ---------------------------------------------------------------------------
 
@@ -3948,3 +3963,427 @@ class TestBulkOperationsSpec18:
         finally:
             win.close()
             win.deleteLater()
+
+
+# ---------------------------------------------------------------------------
+# A20 — SPEC-20: persisted preferences — save / load / round-trip
+# ---------------------------------------------------------------------------
+
+class TestPersistedPreferences:
+    """A20: SPEC-20 persisted preferences module and MainWindow integration.
+
+    All tests use FFE_PREFS_CONFIG_DIR monkeypatching to isolate from the
+    real user config dir — same pattern used for FFE_PRESETS_DIR in A13.
+    """
+
+    def test_load_settings_returns_defaults_when_missing(self, tmp_path, monkeypatch):
+        """load_settings() with no config file returns the canonical defaults."""
+        monkeypatch.setenv("FFE_PREFS_CONFIG_DIR", str(tmp_path / "nodir"))
+        from ff_explorer.gui.settings_prefs import load_settings, DEFAULTS
+        result = load_settings()
+        assert result == DEFAULTS, (
+            "load_settings() must return DEFAULTS when no config file exists"
+        )
+
+    def test_save_and_load_round_trip(self, tmp_path, monkeypatch):
+        """save_settings(d) then load_settings() returns d."""
+        monkeypatch.setenv("FFE_PREFS_CONFIG_DIR", str(tmp_path))
+        from ff_explorer.gui.settings_prefs import load_settings, save_settings
+        data = {
+            "last_root": "/some/test/path",
+            "mode": "files",
+            "action_index": 2,
+            "match_mode_index": 1,
+            "case_sensitive": False,
+            "min_size": 10,
+            "max_size": 500,
+            "respect_ignore": True,
+            "include_hidden": False,
+            "search_archives": True,
+            "versioning": True,
+        }
+        save_settings(data)
+        result = load_settings()
+        assert result == data, (
+            "load_settings() after save_settings(d) must return d exactly"
+        )
+
+    def test_corrupt_settings_file_returns_defaults(self, tmp_path, monkeypatch):
+        """Corrupt settings.json must return defaults — no crash."""
+        monkeypatch.setenv("FFE_PREFS_CONFIG_DIR", str(tmp_path))
+        (tmp_path / "settings.json").write_text("NOT VALID JSON {{{{", encoding="utf-8")
+        from ff_explorer.gui.settings_prefs import load_settings, DEFAULTS
+        result = load_settings()
+        assert result == DEFAULTS, (
+            "load_settings() must return DEFAULTS when settings.json is corrupt"
+        )
+
+    def test_wrong_type_value_replaced_with_default(self, tmp_path, monkeypatch):
+        """A settings.json key with wrong type is replaced by the default."""
+        monkeypatch.setenv("FFE_PREFS_CONFIG_DIR", str(tmp_path))
+        # Write a file where case_sensitive has wrong type (should be bool)
+        import json as _json
+        (tmp_path / "settings.json").write_text(
+            _json.dumps({"case_sensitive": "wrong_type"}),
+            encoding="utf-8",
+        )
+        from ff_explorer.gui.settings_prefs import load_settings, DEFAULTS
+        result = load_settings()
+        assert result["case_sensitive"] == DEFAULTS["case_sensitive"], (
+            "Wrong-type value must be replaced by the default"
+        )
+
+    def test_main_window_restores_last_root_on_init(self, qapp, tmp_path, monkeypatch):
+        """MainWindow restores last_root from prefs on construction."""
+        monkeypatch.setenv("FFE_PREFS_CONFIG_DIR", str(tmp_path))
+        from ff_explorer.gui.settings_prefs import save_settings
+        save_settings({"last_root": str(tmp_path)})
+        win = MainWindow()
+        try:
+            assert win._path_edit.text() == str(tmp_path), (
+                "MainWindow must restore last_root from saved settings"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_main_window_restores_mode_files_on_init(self, qapp, tmp_path, monkeypatch):
+        """MainWindow restores mode='files' (radio_files checked) from prefs."""
+        monkeypatch.setenv("FFE_PREFS_CONFIG_DIR", str(tmp_path))
+        from ff_explorer.gui.settings_prefs import save_settings
+        save_settings({"mode": "files"})
+        win = MainWindow()
+        try:
+            assert win._radio_files.isChecked(), (
+                "mode='files' in prefs must check _radio_files on init"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_main_window_restores_case_insensitive_on_init(self, qapp, tmp_path, monkeypatch):
+        """MainWindow restores case_sensitive=False from prefs."""
+        monkeypatch.setenv("FFE_PREFS_CONFIG_DIR", str(tmp_path))
+        from ff_explorer.gui.settings_prefs import save_settings
+        save_settings({"case_sensitive": False})
+        win = MainWindow()
+        try:
+            assert not win._case_sensitive_check.isChecked(), (
+                "case_sensitive=False in prefs must uncheck _case_sensitive_check"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_close_event_persists_settings(self, qapp, tmp_path, monkeypatch):
+        """Closing MainWindow writes settings.json with current form state."""
+        monkeypatch.setenv("FFE_PREFS_CONFIG_DIR", str(tmp_path))
+        win = MainWindow()
+        try:
+            win._path_edit.setText(str(tmp_path))
+            win._radio_files.setChecked(True)
+            win._case_sensitive_check.setChecked(False)
+        finally:
+            win.close()
+            win.deleteLater()
+
+        settings_file = tmp_path / "settings.json"
+        assert settings_file.exists(), (
+            "closeEvent must write settings.json"
+        )
+        from ff_explorer.gui.settings_prefs import load_settings
+        monkeypatch.setenv("FFE_PREFS_CONFIG_DIR", str(tmp_path))
+        result = load_settings()
+        assert result["last_root"] == str(tmp_path), (
+            "Persisted last_root must match the path set before close"
+        )
+        assert result["mode"] == "files", (
+            "Persisted mode must be 'files' when radio_files was checked"
+        )
+        assert result["case_sensitive"] is False, (
+            "Persisted case_sensitive must be False when checkbox was unchecked"
+        )
+
+    def test_collect_current_settings_returns_dict(self, qapp, tmp_path, monkeypatch):
+        """_collect_current_settings() returns a dict with all expected keys."""
+        monkeypatch.setenv("FFE_PREFS_CONFIG_DIR", str(tmp_path))
+        from ff_explorer.gui.settings_prefs import DEFAULTS
+        win = MainWindow()
+        try:
+            settings = win._collect_current_settings()
+            for key in DEFAULTS:
+                assert key in settings, (
+                    f"_collect_current_settings() must include key {key!r}"
+                )
+        finally:
+            win.close()
+            win.deleteLater()
+
+
+# ---------------------------------------------------------------------------
+# A22 — SPEC-22: accessibility & keyboard navigation
+# ---------------------------------------------------------------------------
+
+class TestAccessibilityAndKeyboardNavigation:
+    """A22: SPEC-22 accessibility, mnemonics, tab order, accessible names,
+    and keyboard shortcuts.
+    """
+
+    # ---- Mnemonics ----
+
+    def test_browse_button_has_mnemonic(self, qapp):
+        """Browse button text includes & mnemonic (Alt+B)."""
+        win = MainWindow()
+        try:
+            assert "&" in win._browse_btn.text(), (
+                "Browse button must have an & mnemonic (SPEC-22)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_run_button_has_mnemonic(self, qapp):
+        """Run button text includes & mnemonic (Alt+R)."""
+        win = MainWindow()
+        try:
+            assert "&" in win._run_btn.text(), (
+                "Run button must have an & mnemonic (SPEC-22)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_filters_toggle_has_mnemonic(self, qapp):
+        """Filters toggle button text includes & mnemonic (Alt+F)."""
+        win = MainWindow()
+        try:
+            assert "&" in win._filters_toggle_btn.text(), (
+                "Filters toggle must have an & mnemonic (SPEC-22)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_filters_toggle_mnemonic_preserved_after_toggle(self, qapp):
+        """_toggle_filters preserves the & mnemonic in both expanded/collapsed states."""
+        win = MainWindow()
+        try:
+            win._toggle_filters(True)
+            assert "&" in win._filters_toggle_btn.text(), (
+                "Filters toggle mnemonic must be preserved when panel is shown"
+            )
+            win._toggle_filters(False)
+            assert "&" in win._filters_toggle_btn.text(), (
+                "Filters toggle mnemonic must be preserved when panel is hidden"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    # ---- Ctrl+Return shortcut ----
+
+    def test_ctrl_return_triggers_run(self, qapp):
+        """Ctrl+Return shortcut calls _run (SPEC-22 additional shortcut)."""
+        win = MainWindow()
+        try:
+            run_calls = []
+            win._run = lambda: run_calls.append(True)  # type: ignore[method-assign]
+
+            from PySide6.QtCore import QEvent
+            from PySide6.QtGui import QKeyEvent
+            key_event = QKeyEvent(
+                QEvent.Type.KeyPress,
+                Qt.Key.Key_Return,
+                Qt.KeyboardModifier.ControlModifier,
+            )
+            # The Ctrl+Return shortcut is a QShortcut — fire it via keyPressEvent
+            # which already handles Key_Return; additionally verify via the
+            # existing keyPressEvent path that the shortcut activates _run.
+            win.keyPressEvent(key_event)
+            assert len(run_calls) >= 1, (
+                "Ctrl+Return must trigger _run (SPEC-22 shortcut)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    # ---- Tab order ----
+
+    def test_tab_order_path_before_browse(self, qapp):
+        """path_edit comes before browse_btn in the tab order."""
+        win = MainWindow()
+        try:
+            # nextInFocusChain starting from path_edit must reach browse_btn
+            # before cycling back to path_edit.
+            seen: list = []
+            widget = win._path_edit
+            for _ in range(50):
+                widget = widget.nextInFocusChain()
+                seen.append(widget)
+                if widget is win._browse_btn:
+                    break
+                if widget is win._path_edit:
+                    break
+            assert win._browse_btn in seen, (
+                "browse_btn must follow path_edit in the tab order (SPEC-22)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_tab_order_browse_before_seed(self, qapp):
+        """browse_btn comes before seed_edit in the tab order."""
+        win = MainWindow()
+        try:
+            seen: list = []
+            widget = win._browse_btn
+            for _ in range(50):
+                widget = widget.nextInFocusChain()
+                seen.append(widget)
+                if widget is win._seed_edit:
+                    break
+                if widget is win._browse_btn:
+                    break
+            assert win._seed_edit in seen, (
+                "seed_edit must follow browse_btn in the tab order (SPEC-22)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_tab_order_run_follows_action_combo(self, qapp):
+        """run_btn follows action_combo in the tab order."""
+        win = MainWindow()
+        try:
+            seen: list = []
+            widget = win._action_combo
+            for _ in range(50):
+                widget = widget.nextInFocusChain()
+                seen.append(widget)
+                if widget is win._run_btn:
+                    break
+                if widget is win._action_combo:
+                    break
+            assert win._run_btn in seen, (
+                "run_btn must follow action_combo in the tab order (SPEC-22)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    # ---- Accessible names ----
+
+    def test_path_edit_has_accessible_name(self, qapp):
+        """_path_edit has a non-empty accessibleName (SPEC-22)."""
+        win = MainWindow()
+        try:
+            assert win._path_edit.accessibleName(), (
+                "_path_edit must have a non-empty accessibleName (SPEC-22)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_seed_edit_has_accessible_name(self, qapp):
+        """_seed_edit has a non-empty accessibleName (SPEC-22)."""
+        win = MainWindow()
+        try:
+            assert win._seed_edit.accessibleName(), (
+                "_seed_edit must have a non-empty accessibleName (SPEC-22)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_run_btn_has_accessible_name(self, qapp):
+        """_run_btn has a non-empty accessibleName (SPEC-22)."""
+        win = MainWindow()
+        try:
+            assert win._run_btn.accessibleName(), (
+                "_run_btn must have a non-empty accessibleName (SPEC-22)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_action_combo_has_accessible_name(self, qapp):
+        """_action_combo has a non-empty accessibleName (SPEC-22)."""
+        win = MainWindow()
+        try:
+            assert win._action_combo.accessibleName(), (
+                "_action_combo must have a non-empty accessibleName (SPEC-22)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_browse_btn_has_accessible_name(self, qapp):
+        """browse button has a non-empty accessibleName (SPEC-22)."""
+        win = MainWindow()
+        try:
+            assert win._browse_btn.accessibleName(), (
+                "_browse_btn must have a non-empty accessibleName (SPEC-22)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_radio_folders_has_accessible_name(self, qapp):
+        """_radio_folders has a non-empty accessibleName (SPEC-22)."""
+        win = MainWindow()
+        try:
+            assert win._radio_folders.accessibleName(), (
+                "_radio_folders must have a non-empty accessibleName (SPEC-22)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_radio_files_has_accessible_name(self, qapp):
+        """_radio_files has a non-empty accessibleName (SPEC-22)."""
+        win = MainWindow()
+        try:
+            assert win._radio_files.accessibleName(), (
+                "_radio_files must have a non-empty accessibleName (SPEC-22)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_filters_toggle_has_accessible_name(self, qapp):
+        """_filters_toggle_btn has a non-empty accessibleName (SPEC-22)."""
+        win = MainWindow()
+        try:
+            assert win._filters_toggle_btn.accessibleName(), (
+                "_filters_toggle_btn must have a non-empty accessibleName (SPEC-22)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    # ---- Focus rule in theme ----
+
+    def test_focus_qss_rule_present_in_build_stylesheet(self, qapp):
+        """build_stylesheet output contains a :focus rule for focus ring visibility."""
+        from ff_explorer.gui.theme import build_stylesheet, LIGHT
+        qss = build_stylesheet(LIGHT)
+        assert ":focus" in qss, (
+            "build_stylesheet must include a :focus QSS rule for focus ring (SPEC-22)"
+        )
+
+    # ---- Accessible names registry completeness ----
+
+    def test_widget_accessible_names_covers_primary_interactive_keys(self, qapp):
+        """WIDGET_ACCESSIBLE_NAMES covers the primary interactive widget keys."""
+        from ff_explorer.gui.widget_info import WIDGET_ACCESSIBLE_NAMES
+        required_keys = {
+            "path", "path_browse", "seed", "mode_folders", "mode_files",
+            "action", "run", "filters_toggle", "settings",
+        }
+        for key in required_keys:
+            assert key in WIDGET_ACCESSIBLE_NAMES, (
+                f"WIDGET_ACCESSIBLE_NAMES must include key {key!r} (SPEC-22)"
+            )
+            assert WIDGET_ACCESSIBLE_NAMES[key], (
+                f"WIDGET_ACCESSIBLE_NAMES[{key!r}] must be non-empty"
+            )

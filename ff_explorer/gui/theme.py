@@ -350,6 +350,10 @@ QPushButton:disabled {{
 QPushButton:pressed {{
     background-color: {t.button_hover_bg};
 }}
+QPushButton:focus {{
+    border-color: {t.accent};
+    outline: none;
+}}
 QPushButton#runButton {{
     background-color: {t.button_bg};
     color: {t.button_text};
@@ -391,6 +395,10 @@ QComboBox {{
 QComboBox:hover {{
     border-color: {t.accent};
 }}
+QComboBox:focus {{
+    border-color: {t.accent};
+    outline: none;
+}}
 QComboBox QAbstractItemView {{
     background-color: {t.panel_bg};
     color: {t.text_primary};
@@ -413,6 +421,16 @@ QCheckBox {{
 }}
 QCheckBox:disabled {{
     color: {t.disabled_text};
+}}
+QCheckBox:focus {{
+    outline: 1px solid {t.accent};
+}}
+QRadioButton:focus {{
+    outline: 1px solid {t.accent};
+}}
+QSpinBox:focus {{
+    border-color: {t.accent};
+    outline: none;
 }}
 
 /* ---- List / Tree / Table views ---- */
