@@ -27,11 +27,13 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Iterator
 
 from ff_explorer.core import (
     EntryKind,
     MatchEntry,
+    SkippedEntry,
+    ListingResult,
     SizedEntry,
     RemovalReport,
     CompressionReport,
@@ -39,6 +41,8 @@ from ff_explorer.core import (
     InvalidRegexError,
     ContentSearchUngatedError,
     list_entries as _core_list_entries,
+    iter_entries as _core_iter_entries,
+    list_entries_with_report as _core_list_entries_with_report,
     entry_metadata as _core_entry_metadata,
     save_listing as _core_save_listing,
     remove_entries as _core_remove_entries,
@@ -68,6 +72,8 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "list_entries",
+    "iter_entries",
+    "list_entries_with_report",
     "entry_metadata",
     "save_listing",
     "remove_entries",
@@ -84,6 +90,8 @@ __all__ = [
     "index_status",
     "EntryKind",
     "MatchEntry",
+    "SkippedEntry",
+    "ListingResult",
     "SizedEntry",
     "RemovalReport",
     "CompressionReport",
@@ -198,6 +206,135 @@ def list_entries(
         (Also a subtype of ``ValueError``.)
     """
     return _core_list_entries(
+        path,
+        EntryKind(int(kind)),
+        name_seed,
+        case_sensitive=case_sensitive,
+        match_mode=match_mode,
+        min_size=min_size,
+        max_size=max_size,
+        modified_after=modified_after,
+        modified_before=modified_before,
+        extensions=extensions,
+        respect_ignore=respect_ignore,
+        ignore_globs=ignore_globs,
+        search_archives=search_archives,
+        content_query=content_query,
+        content_max_bytes=content_max_bytes,
+    )
+
+
+def iter_entries(
+    path: str,
+    kind: int,
+    name_seed: str = "",
+    *,
+    case_sensitive: bool = True,
+    match_mode: str = "substring",
+    min_size: int | None = None,
+    max_size: int | None = None,
+    modified_after: float | None = None,
+    modified_before: float | None = None,
+    extensions: Iterable[str] | None = None,
+    respect_ignore: bool = False,
+    ignore_globs: list[str] | None = None,
+    search_archives: bool = False,
+    content_query: str | None = None,
+    content_max_bytes: int = CONTENT_MAX_BYTES,
+    _skipped: "list[SkippedEntry] | None" = None,
+) -> "Iterator[MatchEntry]":
+    """Streaming generator variant of :func:`list_entries`.
+
+    Yields each :class:`MatchEntry` as the walk discovers it without
+    accumulating a full results list.  Thin passthrough to
+    :func:`ff_explorer.core.iter_entries`.
+
+    Parameters
+    ----------
+    path, kind, name_seed, case_sensitive, match_mode, min_size, max_size,
+    modified_after, modified_before, extensions, respect_ignore, ignore_globs,
+    search_archives, content_query, content_max_bytes:
+        Same semantics as :func:`list_entries`.
+    _skipped:
+        Optional list; mutated in-place with :class:`SkippedEntry` objects for
+        every path skipped due to a recoverable error.  ``None`` = errors are
+        only logged.
+
+    Yields
+    ------
+    MatchEntry
+        One per matching entry in ``os.walk`` top-down order.
+
+    Raises
+    ------
+    ValueError, InvalidRegexError, ContentSearchUngatedError:
+        Same conditions as :func:`list_entries`.
+    """
+    return _core_iter_entries(
+        path,
+        EntryKind(int(kind)),
+        name_seed,
+        case_sensitive=case_sensitive,
+        match_mode=match_mode,
+        min_size=min_size,
+        max_size=max_size,
+        modified_after=modified_after,
+        modified_before=modified_before,
+        extensions=extensions,
+        respect_ignore=respect_ignore,
+        ignore_globs=ignore_globs,
+        search_archives=search_archives,
+        content_query=content_query,
+        content_max_bytes=content_max_bytes,
+        _skipped=_skipped,
+    )
+
+
+def list_entries_with_report(
+    path: str,
+    kind: int,
+    name_seed: str = "",
+    *,
+    case_sensitive: bool = True,
+    match_mode: str = "substring",
+    min_size: int | None = None,
+    max_size: int | None = None,
+    modified_after: float | None = None,
+    modified_before: float | None = None,
+    extensions: Iterable[str] | None = None,
+    respect_ignore: bool = False,
+    ignore_globs: list[str] | None = None,
+    search_archives: bool = False,
+    content_query: str | None = None,
+    content_max_bytes: int = CONTENT_MAX_BYTES,
+) -> ListingResult:
+    """Walk *path* and return matched entries together with a skip report.
+
+    Thin passthrough to :func:`ff_explorer.core.list_entries_with_report`.
+    Identical to :func:`list_entries` except the return value bundles entries
+    with a :class:`SkippedEntry` list for every path skipped due to a
+    recoverable error.  The walk always completes.
+
+    Parameters
+    ----------
+    path, kind, name_seed, case_sensitive, match_mode, min_size, max_size,
+    modified_after, modified_before, extensions, respect_ignore, ignore_globs,
+    search_archives, content_query, content_max_bytes:
+        Same semantics as :func:`list_entries`.
+
+    Returns
+    -------
+    ListingResult
+        ``.entries`` — matched :class:`MatchEntry` objects.
+        ``.skipped`` — :class:`SkippedEntry` objects for paths that could not
+        be accessed.  Empty list when no errors occurred.
+
+    Raises
+    ------
+    ValueError, InvalidRegexError, ContentSearchUngatedError:
+        Same conditions as :func:`list_entries`.
+    """
+    return _core_list_entries_with_report(
         path,
         EntryKind(int(kind)),
         name_seed,
