@@ -174,7 +174,6 @@ def remove_pseudo_locale(app, translator: QTranslator | None = None) -> None:
     """
     if translator is not None:
         app.removeTranslator(translator)
-        _installed.discard(translator) if hasattr(_installed, "discard") else None
         if translator in _installed:
             _installed.remove(translator)
     else:
