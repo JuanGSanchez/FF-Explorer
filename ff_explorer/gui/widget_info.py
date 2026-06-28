@@ -162,6 +162,22 @@ WIDGET_INFO: dict[str, str] = {
         "recycle bin.  Provides a stronger, auditable recovery trail.\n"
         "Applies only to the 'Remove list' action."
     ),
+    "filter_include_hidden": (
+        "When checked (default), hidden and system entries are included in\n"
+        "results — identical to prior behaviour.  Uncheck to exclude hidden\n"
+        "files and directories (dotfiles on POSIX; Hidden/System attribute\n"
+        "on Windows)."
+    ),
+
+    # ---- Results / properties view (SPEC-19) ----
+    "results_show_skipped": (
+        "Show the list of paths that were skipped during the scan\n"
+        "due to permission or access errors."
+    ),
+    "results_properties": (
+        "Show detailed metadata (size, type, created/modified times,\n"
+        "permissions) for the selected entry."
+    ),
 
     # ---- Settings dialog ----
     "settings_swatch": "Click to change colour",

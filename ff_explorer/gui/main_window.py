@@ -21,11 +21,12 @@ Filter controls (FFX-I01/FFX-I02):
     Extensions  — QLineEdit (comma/space-separated, e.g. ".txt, .md")
     All grouped under a collapsible "Filters ▼/▶" section.
 
-Extended filter controls (FFX-I04/I05/I09):
+Extended filter controls (FFX-I04/I05/I09/SPEC-17):
     Content contains — QLineEdit (FFX-I09): content_query; gated by core
     Search in archives — QCheckBox (FFX-I05): search_archives=True
     Respect .gitignore/.ignore — QCheckBox (FFX-I04): respect_ignore=True
     Extra ignore globs — QLineEdit (FFX-I04): ignore_globs (comma/space split)
+    Include hidden/system — QCheckBox (SPEC-17): include_hidden=False when unchecked
 
 Action controls (FFX-I03/I06/I07/I08/I10):
     Version (remove) — QCheckBox (FFX-I08): versioning=True on remove_entries
@@ -85,6 +86,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QInputDialog,
     QLabel,
     QLineEdit,
@@ -97,6 +99,8 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSpinBox,
     QStatusBar,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWhatsThis,
     QWidget,
@@ -108,8 +112,11 @@ from ff_explorer.gui.widget_info import info_text, register_info, register_info_
 from ff_explorer import (
     EmptySeedError,
     EntryKind,
+    ListingResult,
     MatchEntry,
+    SkippedEntry,
     compress_entries,
+    entry_metadata,
     iter_entries,
     list_entries,
     remove_entries,
@@ -164,6 +171,9 @@ class _ScanWorker(QObject):
 
     progress = Signal(int, str)
     finished = Signal(list)
+    # SPEC-15: emitted after finished with a (possibly empty) list of SkippedEntry
+    # objects for every path that could not be accessed during the walk.
+    skipped = Signal(list)
     error = Signal(object)
 
     def __init__(
@@ -193,14 +203,24 @@ class _ScanWorker(QObject):
     # ------------------------------------------------------------------
 
     def run(self) -> None:
-        """Consume ``iter_entries`` and emit progress/finished/error.
+        """Consume ``iter_entries`` and emit progress/finished/skipped/error.
 
         No QWidget access occurs here.  All results are marshalled to the
         main thread via signals.
+
+        SPEC-15: collects skipped paths via the iter_entries ``_skipped``
+        parameter.  When the scan completes normally, ``finished`` is emitted
+        with the matched entries list, then ``skipped`` is emitted with the
+        (possibly empty) list of SkippedEntry objects.
         """
         try:
             collected: list[MatchEntry] = []
-            gen = iter_entries(self._path, self._kind, self._seed, **self._list_kwargs)
+            skipped_entries: list[SkippedEntry] = []
+            gen = iter_entries(
+                self._path, self._kind, self._seed,
+                _skipped=skipped_entries,
+                **self._list_kwargs,
+            )
             for entry in gen:
                 if self._cancelled:
                     return  # silent exit — neither finished nor error emitted
@@ -209,6 +229,7 @@ class _ScanWorker(QObject):
                     self.progress.emit(len(collected), str(entry.path))
             if not self._cancelled:
                 self.finished.emit(collected)
+                self.skipped.emit(skipped_entries)
         except Exception as exc:  # noqa: BLE001
             if not self._cancelled:
                 self.error.emit(exc)
@@ -650,6 +671,12 @@ class MainWindow(QMainWindow):
         register_info(self._versioning_check, "filter_versioning")
         layout.addWidget(self._versioning_check)
 
+        # ---- Include hidden/system entries (SPEC-17) ----
+        self._include_hidden_check = QCheckBox("Include hidden/system entries")
+        self._include_hidden_check.setChecked(True)  # default True = current behaviour
+        register_info(self._include_hidden_check, "filter_include_hidden")
+        layout.addWidget(self._include_hidden_check)
+
         return box
 
     # ------------------------------------------------------------------
@@ -794,6 +821,10 @@ class MainWindow(QMainWindow):
         ignore_globs = self._get_ignore_globs()
         if ignore_globs is not None:
             kwargs["ignore_globs"] = ignore_globs
+
+        # SPEC-17: include_hidden — only add param when False (True is the default)
+        if not self._include_hidden_check.isChecked():
+            kwargs["include_hidden"] = False
 
         return kwargs
 
@@ -979,11 +1010,31 @@ class MainWindow(QMainWindow):
                 f"Scanning for {entry_label}(s)… {count} found\n{current}"
             )
 
+        # SPEC-15: accumulate the skipped signal payload here so that
+        # _on_finished (which fires first) can close the progress dialog, then
+        # _on_skipped (which fires second) can forward the collected skips to
+        # _on_scan_complete.  A simple list cell acts as mutable state shared
+        # between the two closures.
+        _pending: dict = {"entries": [], "skipped_done": False, "skipped": []}
+
         # ---- Finished: close progress dialog, then dispatch post-scan action ----
         def _on_finished(entries: list) -> None:
             progress_dlg.close()
+            _pending["entries"] = entries
+            # The skipped signal may arrive in the same event-loop tick or the
+            # next; we wait for it before dispatching.  In practice both signals
+            # are emitted synchronously inside run() before the thread exits, so
+            # the skipped slot fires immediately after this one in the same
+            # processEvents() sweep.
+            _pending.setdefault("finished_called", True)
+
+        # ---- Skipped: fires immediately after finished (SPEC-15) ----
+        def _on_skipped(skipped: list) -> None:
             _cleanup()
-            self._on_scan_complete(action_code, path, kind, seed, entry_label, entries)
+            self._on_scan_complete(
+                action_code, path, kind, seed, entry_label,
+                _pending["entries"], skipped,
+            )
 
         # ---- Error: close progress dialog, surface the exception ----
         def _on_error(exc: object) -> None:
@@ -1003,6 +1054,7 @@ class MainWindow(QMainWindow):
         # Wire signals (all delivered on the main thread via the Qt event loop).
         worker.progress.connect(_on_progress)
         worker.finished.connect(_on_finished)
+        worker.skipped.connect(_on_skipped)  # SPEC-15
         worker.error.connect(_on_error)
 
         # Start thread → triggers worker.run() via started signal.
@@ -1042,14 +1094,274 @@ class MainWindow(QMainWindow):
         seed: str,
         entry_label: str,
         entries: list[MatchEntry],
+        skipped: "list[SkippedEntry] | None" = None,
     ) -> None:
-        """Dispatch to the correct post-scan handler on the main thread."""
+        """Dispatch to the correct post-scan handler on the main thread.
+
+        Flow (SPEC-19 design):
+          1. Surface skip report in status bar (SPEC-15).
+          2. Open the results view dialog showing the matched entries (SPEC-19).
+             The dialog is non-blocking for the chosen action — it opens, lets
+             the user inspect entries and properties, then returns to allow
+             Save / Remove / Compress to proceed.  It does NOT gate the action;
+             the existing safety dialogs (QMessageBox.question for Remove/Compress)
+             remain the gate.  This way Save/Remove/Compress flows are preserved.
+          3. Dispatch to the action handler (unchanged).
+        """
+        # SPEC-15: surface skip count
+        skipped = skipped or []
+        if skipped:
+            self._set_status(
+                f"{len(skipped)} path(s) skipped (permission/access errors). "
+                "Click 'Show skipped' in the results view for details."
+            )
+
+        # SPEC-19: show results view (always, for any action including Save/Remove/Compress)
+        self._show_results_view(entries, skipped, entry_label)
+
         if action_code == 1:
             self._do_save(path, kind, seed, entry_label, entries)
         elif action_code == 2:
             self._do_remove(path, kind, seed, entry_label, entries)
         elif action_code == 3:
             self._do_compress(path, kind, seed, entry_label, entries)
+
+    # ------------------------------------------------------------------
+    # Results / properties view (SPEC-19)
+    # ------------------------------------------------------------------
+
+    def _show_results_view(
+        self,
+        entries: list[MatchEntry],
+        skipped: "list[SkippedEntry]",
+        entry_label: str,
+    ) -> None:
+        """Open the results dialog (SPEC-19) after a scan completes.
+
+        Shows matched entries in a QTableWidget with columns:
+          Name | Path | Type | Size | Modified
+
+        Size and Modified are fetched from ``entry_metadata`` on demand (lazy):
+        only the currently *selected* row triggers a metadata call — this keeps
+        the dialog responsive for large result sets.  For archive-internal entries
+        whose path does not exist on the filesystem, ``entry_metadata`` may raise
+        OSError/FileNotFoundError; those cells show a blank gracefully.
+
+        A "Properties" button at the bottom opens a small metadata dialog for
+        the selected row (SPEC-19 §2).  A "Show skipped" button (visible only
+        when skips > 0) opens a read-only list of skipped paths (SPEC-15).
+
+        The existing Save / Remove / Compress flows are not gated by this dialog:
+        the dialog is presented, then execution returns to ``_on_scan_complete``
+        which dispatches to the action handler regardless of how the user closes
+        the results view.
+        """
+        dlg = QDialog(self)
+        dlg.setWindowTitle(
+            f"Results — {len(entries)} {entry_label}(s) found"
+            + (f"  ({len(skipped)} skipped)" if skipped else "")
+        )
+        dlg.resize(780, 480)
+        outer = QVBoxLayout(dlg)
+        outer.setContentsMargins(8, 8, 8, 8)
+        outer.setSpacing(6)
+
+        # Summary label
+        summary_lbl = QLabel(
+            f"{len(entries)} {entry_label}(s) found."
+            + (f"  {len(skipped)} path(s) skipped." if skipped else "")
+        )
+        outer.addWidget(summary_lbl)
+
+        # Table: Name | Path | Type | Size | Modified
+        _COL_NAME = 0
+        _COL_PATH = 1
+        _COL_TYPE = 2
+        _COL_SIZE = 3
+        _COL_MODIFIED = 4
+        _HEADERS = ["Name", "Path", "Type", "Size (bytes)", "Modified"]
+
+        table = QTableWidget(len(entries), len(_HEADERS), dlg)
+        table.setHorizontalHeaderLabels(_HEADERS)
+        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.horizontalHeader().setStretchLastSection(True)
+        table.horizontalHeader().setSectionResizeMode(
+            _COL_PATH, QHeaderView.ResizeMode.Stretch
+        )
+        table.verticalHeader().setVisible(False)
+
+        for row, entry in enumerate(entries):
+            p = entry.path
+            name_item = QTableWidgetItem(p.name if hasattr(p, "name") else str(p).rsplit("/", 1)[-1])
+            path_item = QTableWidgetItem(str(p))
+            # Type, Size, Modified deferred — populated on row selection via
+            # currentRowChanged; pre-fill with placeholder dashes for now.
+            table.setItem(row, _COL_NAME, name_item)
+            table.setItem(row, _COL_PATH, path_item)
+            table.setItem(row, _COL_TYPE, QTableWidgetItem(""))
+            table.setItem(row, _COL_SIZE, QTableWidgetItem(""))
+            table.setItem(row, _COL_MODIFIED, QTableWidgetItem(""))
+
+        # Lazy metadata fetch: populate Type/Size/Modified for the selected row.
+        _meta_cache: dict[int, dict] = {}
+
+        def _fetch_meta_for_row(row: int) -> dict | None:
+            if row in _meta_cache:
+                return _meta_cache[row]
+            if row < 0 or row >= len(entries):
+                return None
+            try:
+                meta = entry_metadata(str(entries[row].path))
+                _meta_cache[row] = meta
+                return meta
+            except (OSError, FileNotFoundError):
+                return None
+
+        def _on_row_changed(current_row: int) -> None:
+            meta = _fetch_meta_for_row(current_row)
+            if meta is None:
+                return
+            import datetime as _dt
+            size_str = str(meta.get("size_bytes", ""))
+            mtime = meta.get("mtime")
+            if mtime is not None:
+                try:
+                    mtime_str = _dt.datetime.fromtimestamp(
+                        mtime, tz=_dt.timezone.utc
+                    ).strftime("%Y-%m-%d %H:%M:%S UTC")
+                except (OSError, OverflowError, ValueError):
+                    mtime_str = str(mtime)
+            else:
+                mtime_str = ""
+            table.item(current_row, _COL_TYPE).setText(str(meta.get("type", "")))
+            table.item(current_row, _COL_SIZE).setText(size_str)
+            table.item(current_row, _COL_MODIFIED).setText(mtime_str)
+
+        # currentCellChanged(currentRow, currentCol, previousRow, previousCol)
+        # is the correct QTableWidget signal for row-change notification.
+        table.currentCellChanged.connect(
+            lambda cur_row, _cc, _pr, _pc: _on_row_changed(cur_row)
+        )
+        # Pre-select first row so properties are visible immediately
+        if entries:
+            table.selectRow(0)
+
+        outer.addWidget(table)
+
+        # Button row: Properties | Show skipped (conditional) | Close
+        btn_row = QHBoxLayout()
+
+        props_btn = QPushButton("Properties")
+        register_info(props_btn, "results_properties")
+        props_btn.setEnabled(bool(entries))
+
+        def _open_properties() -> None:
+            row = table.currentRow()
+            if row < 0 or row >= len(entries):
+                return
+            meta = _fetch_meta_for_row(row)
+            self._show_entry_properties(entries[row].path, meta)
+
+        props_btn.clicked.connect(_open_properties)
+        btn_row.addWidget(props_btn)
+
+        if skipped:
+            skip_btn = QPushButton(f"Show skipped ({len(skipped)})")
+            register_info(skip_btn, "results_show_skipped")
+
+            def _open_skipped() -> None:
+                self._show_skipped_dialog(skipped)
+
+            skip_btn.clicked.connect(_open_skipped)
+            btn_row.addWidget(skip_btn)
+
+        btn_row.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dlg.accept)
+        btn_row.addWidget(close_btn)
+
+        outer.addLayout(btn_row)
+        dlg.exec()
+
+    def _show_entry_properties(self, path, meta: "dict | None") -> None:
+        """Open a small read-only properties dialog for *path* (SPEC-19 §2).
+
+        Shows: path, type, size, created/modified times, permission summary.
+        ``meta`` is the dict from ``entry_metadata``; when None (e.g. path is
+        archive-internal or unreadable) the dialog shows blanks gracefully.
+        """
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Properties — {path}")
+        dlg.resize(480, 260)
+        form = QFormLayout()
+        form.setContentsMargins(12, 12, 12, 12)
+        form.setSpacing(8)
+
+        def _row(label: str, value: str) -> None:
+            lbl = QLabel(value)
+            lbl.setWordWrap(True)
+            form.addRow(QLabel(label), lbl)
+
+        _row("Path:", str(path))
+
+        if meta:
+            import datetime as _dt
+            _row("Type:", str(meta.get("type", "")))
+            size_bytes = meta.get("size_bytes", 0)
+            _row("Size:", f"{size_bytes:,} bytes")
+            mtime = meta.get("mtime")
+            if mtime is not None:
+                try:
+                    mtime_str = _dt.datetime.fromtimestamp(
+                        mtime, tz=_dt.timezone.utc
+                    ).strftime("%Y-%m-%d %H:%M:%S UTC")
+                except (OSError, OverflowError, ValueError):
+                    mtime_str = str(mtime)
+            else:
+                mtime_str = "(unavailable)"
+            _row("Modified:", mtime_str)
+            _row("Exists:", str(meta.get("exists", True)))
+        else:
+            _row("Metadata:", "(unavailable — path may be archive-internal or unreadable)")
+
+        outer_v = QVBoxLayout()
+        outer_v.addLayout(form)
+        ok_btn = QPushButton("OK")
+        ok_btn.clicked.connect(dlg.accept)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_row.addWidget(ok_btn)
+        outer_v.addLayout(btn_row)
+        dlg.setLayout(outer_v)
+        dlg.exec()
+
+    def _show_skipped_dialog(self, skipped: "list[SkippedEntry]") -> None:
+        """Open a read-only dialog listing skipped paths and reasons (SPEC-15)."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Skipped paths ({len(skipped)})")
+        dlg.resize(640, 400)
+        outer = QVBoxLayout(dlg)
+        outer.setContentsMargins(8, 8, 8, 8)
+        outer.setSpacing(6)
+
+        outer.addWidget(QLabel(
+            f"{len(skipped)} path(s) could not be accessed during the scan:"
+        ))
+
+        list_wgt = QListWidget()
+        list_wgt.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+        for se in skipped:
+            list_wgt.addItem(f"{se.path}  —  {se.reason}")
+        outer.addWidget(list_wgt)
+
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dlg.accept)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_row.addWidget(close_btn)
+        outer.addLayout(btn_row)
+        dlg.exec()
 
     # ------------------------------------------------------------------
     # Action helpers (called from _on_scan_complete — main thread only)

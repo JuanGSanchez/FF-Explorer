@@ -2174,6 +2174,7 @@ class TestWidgetRegistryWiring:
         "filter_respect_ignore",   # _respect_ignore_check
         "filter_ignore_globs",     # _ignore_globs_edit
         "filter_versioning",       # _versioning_check
+        "filter_include_hidden",   # _include_hidden_check (SPEC-17)
     }
 
     def test_run_key_exists_in_registry(self):
@@ -2610,6 +2611,10 @@ class TestScanWorker:
                 MatchEntry(path=tmp_path / "world.txt", kind=EntryKind.FILES),
             ]
 
+            # SPEC-19: _on_scan_complete now calls _show_results_view which opens
+            # a QDialog via exec(); suppress it to keep this headless test non-blocking.
+            win._show_results_view = lambda *a, **kw: None  # type: ignore[method-assign]
+
             with patch(
                 "ff_explorer.gui.main_window.save_listing",
                 return_value=tmp_path / "listing.txt",
@@ -2664,3 +2669,575 @@ class TestScanWorker:
             f"Worker must emit at least one progress() signal when > "
             f"{_PROGRESS_INTERVAL} entries are scanned"
         )
+
+
+# ---------------------------------------------------------------------------
+# A18 — SPEC-19: results view + properties dialog
+# ---------------------------------------------------------------------------
+
+class TestResultsView:
+    """A18: _show_results_view builds a QDialog with a table and properties
+    button; _show_entry_properties opens a metadata dialog; both work headlessly.
+    """
+
+    @staticmethod
+    def _make_entries(tmp_path: Path) -> list:
+        from ff_explorer import MatchEntry, EntryKind
+        f1 = tmp_path / "alpha.txt"
+        f2 = tmp_path / "beta.py"
+        f1.write_bytes(b"hello")
+        f2.write_bytes(b"world" * 10)
+        return [
+            MatchEntry(path=f1, kind=EntryKind.FILES),
+            MatchEntry(path=f2, kind=EntryKind.FILES),
+        ]
+
+    def test_show_results_view_opens_dialog(self, qapp, tmp_path):
+        """_show_results_view opens a QDialog without error (headless)."""
+        from PySide6.QtWidgets import QDialog
+        win = MainWindow()
+        try:
+            entries = self._make_entries(tmp_path)
+            dialogs_opened = []
+
+            def fake_exec(self_dlg):
+                dialogs_opened.append(self_dlg)
+                return 0
+
+            with patch.object(QDialog, "exec", fake_exec):
+                win._show_results_view(entries, [], "file")
+
+            assert len(dialogs_opened) == 1, (
+                "_show_results_view must open exactly one QDialog"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_results_view_table_has_correct_row_count(self, qapp, tmp_path):
+        """Results table has one row per entry in the entries list."""
+        from PySide6.QtWidgets import QDialog, QTableWidget
+        win = MainWindow()
+        try:
+            entries = self._make_entries(tmp_path)
+            tables_found = []
+
+            def fake_exec(self_dlg):
+                for child in self_dlg.findChildren(QTableWidget):
+                    tables_found.append(child)
+                return 0
+
+            with patch.object(QDialog, "exec", fake_exec):
+                win._show_results_view(entries, [], "file")
+
+            assert len(tables_found) == 1, "Results dialog must contain exactly one QTableWidget"
+            assert tables_found[0].rowCount() == len(entries), (
+                f"Table must have {len(entries)} rows, one per entry"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_results_view_table_has_five_columns(self, qapp, tmp_path):
+        """Results table has exactly 5 columns: Name, Path, Type, Size, Modified."""
+        from PySide6.QtWidgets import QDialog, QTableWidget
+        win = MainWindow()
+        try:
+            entries = self._make_entries(tmp_path)
+            tables_found = []
+
+            def fake_exec(self_dlg):
+                for child in self_dlg.findChildren(QTableWidget):
+                    tables_found.append(child)
+                return 0
+
+            with patch.object(QDialog, "exec", fake_exec):
+                win._show_results_view(entries, [], "file")
+
+            assert tables_found, "Results dialog must contain a QTableWidget"
+            assert tables_found[0].columnCount() == 5, (
+                "Results table must have exactly 5 columns (Name, Path, Type, Size, Modified)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_results_view_first_row_name_matches_entry(self, qapp, tmp_path):
+        """First table row Name cell contains the filename of the first entry."""
+        from PySide6.QtWidgets import QDialog, QTableWidget
+        win = MainWindow()
+        try:
+            entries = self._make_entries(tmp_path)
+            tables_found = []
+
+            def fake_exec(self_dlg):
+                for child in self_dlg.findChildren(QTableWidget):
+                    tables_found.append(child)
+                return 0
+
+            with patch.object(QDialog, "exec", fake_exec):
+                win._show_results_view(entries, [], "file")
+
+            table = tables_found[0]
+            name_cell = table.item(0, 0)
+            assert name_cell is not None, "Name cell in row 0 must not be None"
+            assert entries[0].path.name in name_cell.text(), (
+                f"Name cell must contain '{entries[0].path.name}', got {name_cell.text()!r}"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_results_view_empty_entries_opens_dialog(self, qapp, tmp_path):
+        """_show_results_view with empty entries list still opens without crash."""
+        from PySide6.QtWidgets import QDialog
+        win = MainWindow()
+        try:
+            dialogs_opened = []
+
+            def fake_exec(self_dlg):
+                dialogs_opened.append(self_dlg)
+                return 0
+
+            with patch.object(QDialog, "exec", fake_exec):
+                win._show_results_view([], [], "file")
+
+            assert len(dialogs_opened) == 1, (
+                "_show_results_view must open a dialog even with zero entries"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_show_entry_properties_opens_dialog_for_real_file(self, qapp, tmp_path):
+        """_show_entry_properties opens a properties dialog with non-empty metadata."""
+        from PySide6.QtWidgets import QDialog
+        from ff_explorer import entry_metadata
+        win = MainWindow()
+        try:
+            real_file = tmp_path / "propped.txt"
+            real_file.write_bytes(b"prop content")
+            meta = entry_metadata(str(real_file))
+            assert meta, "entry_metadata must return a non-empty dict for a real file"
+
+            dialogs_opened = []
+
+            def fake_exec(self_dlg):
+                dialogs_opened.append(self_dlg)
+                return 0
+
+            with patch.object(QDialog, "exec", fake_exec):
+                win._show_entry_properties(real_file, meta)
+
+            assert len(dialogs_opened) == 1, (
+                "_show_entry_properties must open exactly one dialog"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_show_entry_properties_none_meta_no_crash(self, qapp, tmp_path):
+        """_show_entry_properties with meta=None (archive-internal path) must not crash."""
+        from PySide6.QtWidgets import QDialog
+        win = MainWindow()
+        try:
+            from pathlib import Path
+            fake_path = Path("/archive.zip/internal/member.txt")
+            dialogs_opened = []
+
+            def fake_exec(self_dlg):
+                dialogs_opened.append(self_dlg)
+                return 0
+
+            with patch.object(QDialog, "exec", fake_exec):
+                win._show_entry_properties(fake_path, None)
+
+            assert len(dialogs_opened) == 1, (
+                "_show_entry_properties with None meta must still open a dialog (no crash)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_on_scan_complete_calls_show_results_view(self, qapp, tmp_path):
+        """_on_scan_complete always calls _show_results_view before the action handler.
+
+        This verifies the SPEC-19 flow: results view is shown for all actions
+        (Save/Remove/Compress) without gating them.
+        """
+        from ff_explorer import MatchEntry, EntryKind
+        win = MainWindow()
+        try:
+            f = tmp_path / "item.txt"
+            f.write_bytes(b"x")
+            entries = [MatchEntry(path=f, kind=EntryKind.FILES)]
+
+            results_view_calls = []
+            save_calls = []
+
+            def fake_results_view(ents, skipped, label):
+                results_view_calls.append({"entries": ents, "skipped": skipped})
+
+            def fake_save(path, kind, seed, **kwargs):
+                save_calls.append(True)
+                return tmp_path / "out.txt"
+
+            win._show_results_view = fake_results_view  # type: ignore[method-assign]
+
+            with patch("ff_explorer.gui.main_window.save_listing",
+                       side_effect=fake_save):
+                win._on_scan_complete(1, str(tmp_path), EntryKind.FILES, "", "file", entries)
+
+            assert len(results_view_calls) == 1, (
+                "_on_scan_complete must call _show_results_view exactly once"
+            )
+            assert len(save_calls) == 1, (
+                "_on_scan_complete must still call save_listing after showing results view"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_results_view_with_skipped_shows_skip_button(self, qapp, tmp_path):
+        """When skipped list is non-empty, the results dialog contains a 'Show skipped' button."""
+        from PySide6.QtWidgets import QDialog, QPushButton
+        from ff_explorer.core import SkippedEntry
+        win = MainWindow()
+        try:
+            entries = self._make_entries(tmp_path)
+            skipped = [SkippedEntry(path="/no/access/dir", reason="PermissionError: [Errno 13]")]
+            buttons_found = []
+
+            def fake_exec(self_dlg):
+                for btn in self_dlg.findChildren(QPushButton):
+                    if "skipped" in btn.text().lower():
+                        buttons_found.append(btn)
+                return 0
+
+            with patch.object(QDialog, "exec", fake_exec):
+                win._show_results_view(entries, skipped, "file")
+
+            assert len(buttons_found) >= 1, (
+                "Results dialog must show a 'Show skipped' button when skipped list is non-empty"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_results_view_no_skipped_no_skip_button(self, qapp, tmp_path):
+        """When skipped list is empty, the results dialog has no 'Show skipped' button."""
+        from PySide6.QtWidgets import QDialog, QPushButton
+        win = MainWindow()
+        try:
+            entries = self._make_entries(tmp_path)
+            skip_buttons = []
+
+            def fake_exec(self_dlg):
+                for btn in self_dlg.findChildren(QPushButton):
+                    if "skipped" in btn.text().lower():
+                        skip_buttons.append(btn)
+                return 0
+
+            with patch.object(QDialog, "exec", fake_exec):
+                win._show_results_view(entries, [], "file")
+
+            assert len(skip_buttons) == 0, (
+                "Results dialog must NOT show a 'Show skipped' button when skipped is empty"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+
+# ---------------------------------------------------------------------------
+# A19 — SPEC-15: skip report surfaced by the scan worker
+# ---------------------------------------------------------------------------
+
+class TestSkipReport:
+    """A19: _ScanWorker emits skipped signal; _on_scan_complete surfaces skip
+    count in the status bar; _show_skipped_dialog opens a read-only list.
+    """
+
+    @staticmethod
+    def _spin_until(condition, timeout_ms: int = 3000) -> bool:
+        import time
+        from PySide6.QtWidgets import QApplication
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        while time.monotonic() < deadline:
+            QApplication.processEvents()
+            if condition():
+                return True
+        return False
+
+    def test_worker_emits_skipped_signal(self, qapp, tmp_path):
+        """_ScanWorker emits skipped signal after finished.
+
+        Even for a fully-readable tree the skipped signal must be emitted
+        (with an empty list).  This verifies the signal exists and fires.
+        """
+        from ff_explorer import EntryKind
+        from ff_explorer.gui.main_window import _ScanWorker
+        from PySide6.QtCore import QThread
+
+        (tmp_path / "a.txt").write_bytes(b"a")
+
+        finished_calls: list = []
+        skipped_calls: list = []
+
+        worker = _ScanWorker(str(tmp_path), EntryKind.FILES, "", {})
+        thread = QThread()
+        worker.moveToThread(thread)
+        worker.finished.connect(lambda e: finished_calls.append(e))
+        worker.skipped.connect(lambda s: skipped_calls.append(s))
+        thread.started.connect(worker.run)
+        thread.start()
+
+        done = self._spin_until(
+            lambda: bool(skipped_calls),
+            timeout_ms=5000,
+        )
+        thread.quit()
+        thread.wait()
+
+        assert done, "Worker did not emit skipped signal within 5 s"
+        assert len(skipped_calls) == 1, "Worker must emit skipped exactly once"
+        assert isinstance(skipped_calls[0], list), "skipped payload must be a list"
+        # For a readable tree, skipped list is empty
+        assert skipped_calls[0] == [], (
+            "For a fully-readable tree, skipped list must be empty"
+        )
+
+    def test_on_scan_complete_status_bar_shows_skip_count(self, qapp, tmp_path):
+        """_on_scan_complete with non-empty skipped list calls _set_status with
+        a message mentioning the skip count.
+
+        Note: _do_save (action_code=1) subsequently calls _set_status with
+        the save result, overwriting the status bar.  We therefore spy on
+        _set_status to capture ALL calls and assert that at least one mentions
+        'skipped', rather than reading the final bar value.
+        """
+        from ff_explorer import MatchEntry, EntryKind
+        from ff_explorer.core import SkippedEntry
+        win = MainWindow()
+        try:
+            f = tmp_path / "item.txt"
+            f.write_bytes(b"x")
+            entries = [MatchEntry(path=f, kind=EntryKind.FILES)]
+            skipped = [SkippedEntry(path="/locked/dir", reason="PermissionError")]
+
+            # Suppress the results view dialog to keep the test non-blocking.
+            win._show_results_view = lambda *a, **kw: None  # type: ignore[method-assign]
+
+            # Spy on _set_status to capture every call during _on_scan_complete.
+            status_calls: list[str] = []
+            original_set_status = win._set_status
+            win._set_status = lambda msg: (status_calls.append(msg), original_set_status(msg))  # type: ignore[method-assign]
+
+            with patch("ff_explorer.gui.main_window.save_listing",
+                       return_value=tmp_path / "out.txt"):
+                win._on_scan_complete(
+                    1, str(tmp_path), EntryKind.FILES, "", "file",
+                    entries, skipped,
+                )
+
+            skip_msgs = [m for m in status_calls if "skipped" in m.lower()]
+            assert skip_msgs, (
+                f"_set_status must be called with a message mentioning 'skipped' "
+                f"when skipped list is non-empty.  All calls: {status_calls!r}"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_on_scan_complete_no_skip_status_unchanged(self, qapp, tmp_path):
+        """_on_scan_complete with empty skipped never calls _set_status with 'skipped'."""
+        from ff_explorer import MatchEntry, EntryKind
+        win = MainWindow()
+        try:
+            f = tmp_path / "item.txt"
+            f.write_bytes(b"x")
+            entries = [MatchEntry(path=f, kind=EntryKind.FILES)]
+
+            win._show_results_view = lambda *a, **kw: None  # type: ignore[method-assign]
+
+            status_calls: list[str] = []
+            original_set_status = win._set_status
+            win._set_status = lambda msg: (status_calls.append(msg), original_set_status(msg))  # type: ignore[method-assign]
+
+            with patch("ff_explorer.gui.main_window.save_listing",
+                       return_value=tmp_path / "out.txt"):
+                win._on_scan_complete(
+                    1, str(tmp_path), EntryKind.FILES, "", "file",
+                    entries, [],
+                )
+
+            skip_msgs = [m for m in status_calls if "skipped" in m.lower()]
+            assert not skip_msgs, (
+                f"_set_status must NOT mention 'skipped' when skipped list is empty; "
+                f"got: {skip_msgs!r}"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_show_skipped_dialog_opens_with_entries(self, qapp, tmp_path):
+        """_show_skipped_dialog opens a QDialog listing skipped paths."""
+        from PySide6.QtWidgets import QDialog, QListWidget
+        from ff_explorer.core import SkippedEntry
+        win = MainWindow()
+        try:
+            skipped = [
+                SkippedEntry(path="/no/access/a", reason="PermissionError: denied"),
+                SkippedEntry(path="/no/access/b", reason="OSError: stale handle"),
+            ]
+            dialogs_opened = []
+            list_widgets: list = []
+
+            def fake_exec(self_dlg):
+                dialogs_opened.append(self_dlg)
+                for lw in self_dlg.findChildren(QListWidget):
+                    list_widgets.append(lw)
+                return 0
+
+            with patch.object(QDialog, "exec", fake_exec):
+                win._show_skipped_dialog(skipped)
+
+            assert len(dialogs_opened) == 1, (
+                "_show_skipped_dialog must open exactly one QDialog"
+            )
+            assert len(list_widgets) == 1, (
+                "_show_skipped_dialog must contain a QListWidget"
+            )
+            assert list_widgets[0].count() == len(skipped), (
+                f"QListWidget must have {len(skipped)} items, one per SkippedEntry"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_skipped_signal_fires_after_finished(self, qapp, tmp_path):
+        """_ScanWorker emits finished then skipped (order preserved)."""
+        from ff_explorer import EntryKind
+        from ff_explorer.gui.main_window import _ScanWorker
+        from PySide6.QtCore import QThread
+
+        (tmp_path / "file.txt").write_bytes(b"f")
+
+        order: list = []
+        skipped_calls: list = []
+        finished_calls: list = []
+
+        worker = _ScanWorker(str(tmp_path), EntryKind.FILES, "", {})
+        thread = QThread()
+        worker.moveToThread(thread)
+        worker.finished.connect(lambda e: (finished_calls.append(e), order.append("finished")))
+        worker.skipped.connect(lambda s: (skipped_calls.append(s), order.append("skipped")))
+        thread.started.connect(worker.run)
+        thread.start()
+
+        done = self._spin_until(
+            lambda: bool(skipped_calls),
+            timeout_ms=5000,
+        )
+        thread.quit()
+        thread.wait()
+
+        assert done, "Worker did not emit skipped within 5 s"
+        assert order == ["finished", "skipped"], (
+            f"finished must be emitted before skipped; got order: {order}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# A20 — SPEC-17: include_hidden checkbox exists and flows into scan kwargs
+# ---------------------------------------------------------------------------
+
+class TestIncludeHiddenControl:
+    """A20: _include_hidden_check QCheckBox exists, defaults to checked (True),
+    and when unchecked adds include_hidden=False to _build_list_entries_kwargs().
+    """
+
+    def test_include_hidden_check_exists_and_checked_by_default(self, qapp):
+        """_include_hidden_check must exist, be a QCheckBox, and default to checked."""
+        from PySide6.QtWidgets import QCheckBox
+        win = MainWindow()
+        try:
+            assert hasattr(win, "_include_hidden_check"), (
+                "_include_hidden_check must exist on MainWindow (SPEC-17)"
+            )
+            assert isinstance(win._include_hidden_check, QCheckBox)
+            assert win._include_hidden_check.isChecked(), (
+                "_include_hidden_check must be checked by default "
+                "(True = include hidden, preserving prior behaviour)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_include_hidden_checked_not_in_kwargs(self, qapp):
+        """When checked (True = default), include_hidden must NOT appear in kwargs
+        (True is the core default; omitting it is equivalent and avoids noise)."""
+        win = MainWindow()
+        try:
+            win._include_hidden_check.setChecked(True)
+            kwargs = win._build_list_entries_kwargs()
+            assert "include_hidden" not in kwargs, (
+                "include_hidden=True (default) must not appear in kwargs "
+                "— it is the core default and should be omitted"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_include_hidden_unchecked_adds_false_to_kwargs(self, qapp):
+        """Unchecking _include_hidden_check adds include_hidden=False to kwargs."""
+        win = MainWindow()
+        try:
+            win._include_hidden_check.setChecked(False)
+            kwargs = win._build_list_entries_kwargs()
+            assert "include_hidden" in kwargs, (
+                "Unchecking include_hidden_check must add include_hidden to kwargs"
+            )
+            assert kwargs["include_hidden"] is False, (
+                "include_hidden kwarg must be False when checkbox is unchecked"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_include_hidden_registered_in_widget_info(self):
+        """filter_include_hidden key must be present in WIDGET_INFO (SPEC-09 lint)."""
+        from ff_explorer.gui.widget_info import WIDGET_INFO
+        assert "filter_include_hidden" in WIDGET_INFO, (
+            "'filter_include_hidden' must be present in WIDGET_INFO (SPEC-17)"
+        )
+        assert WIDGET_INFO["filter_include_hidden"], (
+            "WIDGET_INFO['filter_include_hidden'] must be a non-empty string"
+        )
+
+    def test_include_hidden_check_has_ff_info_key_property(self, qapp):
+        """_include_hidden_check must carry _ff_info_key='filter_include_hidden'."""
+        win = MainWindow()
+        try:
+            key = win._include_hidden_check.property("_ff_info_key")
+            assert key == "filter_include_hidden", (
+                f"_include_hidden_check must have _ff_info_key='filter_include_hidden', "
+                f"got {key!r}"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_include_hidden_default_state_preserves_existing_kwargs(self, qapp):
+        """Default checked state preserves the full prior kwargs dict unchanged."""
+        win = MainWindow()
+        try:
+            # All other filters at default too — should remain {}
+            kwargs_with_hidden_checked = win._build_list_entries_kwargs()
+            assert kwargs_with_hidden_checked == {}, (
+                "Default state (all filters at default, include_hidden checked) "
+                "must still produce an empty kwargs dict"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
