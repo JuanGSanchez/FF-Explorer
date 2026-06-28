@@ -47,6 +47,8 @@ from ff_explorer.gui.theme import (
     save_theme,
     validate_theme,
 )
+from ff_explorer.gui.widget_info import register_info
+from ff_explorer.gui.i18n import tr
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +98,7 @@ class _SwatchButton(QPushButton):
         self._on_changed = on_changed
         self.setFixedSize(28, 22)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setToolTip("Click to change colour")
+        register_info(self, "settings_swatch")
         self._set_color(hex_color)
         self.clicked.connect(self._pick_color)
 
@@ -156,7 +158,7 @@ class SettingsDialog(QDialog):
         parent=None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("FF Explorer — Settings")
+        self.setWindowTitle(tr("FF Explorer — Settings"))
         self.setMinimumWidth(420)
         self.setModal(True)
 
@@ -197,7 +199,7 @@ class SettingsDialog(QDialog):
 
         # ---- Template selector row ----
         tpl_row = QHBoxLayout()
-        tpl_label = QLabel("Template:")
+        tpl_label = QLabel(tr("Template:"))
         tpl_label.setFixedWidth(80)
         tpl_row.addWidget(tpl_label)
 
@@ -248,26 +250,28 @@ class SettingsDialog(QDialog):
         # ---- Buttons: Reset | Apply | Cancel | OK ----
         btn_row = QHBoxLayout()
 
-        self._reset_btn = QPushButton(f"Reset to {self._current_template}")
-        self._reset_btn.setToolTip("Restore the current template's default colours")
+        self._reset_btn = QPushButton(
+            tr("Reset to {tpl}").replace("{tpl}", self._current_template)
+        )
+        register_info(self._reset_btn, "settings_reset")
         self._reset_btn.clicked.connect(self._on_reset)
         btn_row.addWidget(self._reset_btn)
 
         btn_row.addStretch()
 
-        self._apply_btn = QPushButton("Apply")
-        self._apply_btn.setToolTip("Apply the current colours live without closing")
+        self._apply_btn = QPushButton(tr("Apply"))
+        register_info(self._apply_btn, "settings_apply")
         self._apply_btn.clicked.connect(self._on_apply)
         btn_row.addWidget(self._apply_btn)
 
-        cancel_btn = QPushButton("Cancel")
-        cancel_btn.setToolTip("Revert to the theme active when the dialog was opened")
+        cancel_btn = QPushButton(tr("Cancel"))
+        register_info(cancel_btn, "settings_cancel")
         cancel_btn.clicked.connect(self._on_cancel)
         btn_row.addWidget(cancel_btn)
 
-        ok_btn = QPushButton("OK")
+        ok_btn = QPushButton(tr("OK"))
         ok_btn.setDefault(True)
-        ok_btn.setToolTip("Apply and save, then close")
+        register_info(ok_btn, "settings_ok")
         ok_btn.clicked.connect(self._on_ok)
         btn_row.addWidget(ok_btn)
 
@@ -289,7 +293,9 @@ class SettingsDialog(QDialog):
                 if idx >= 0:
                     self._template_combo.setCurrentIndex(idx)
                 self._template_combo.blockSignals(False)
-                self._reset_btn.setText(f"Reset to {self._current_template}")
+                self._reset_btn.setText(
+                    tr("Reset to {tpl}").replace("{tpl}", self._current_template)
+                )
             self._refresh_validation()
         return handler
 
@@ -306,7 +312,7 @@ class SettingsDialog(QDialog):
     def _refresh_validation(self) -> None:
         violations = validate_theme(self._current_theme)
         if violations:
-            msg = "Colour warnings:\n" + "\n".join(f"  • {v}" for v in violations)
+            msg = tr("Colour warnings:\n") + "\n".join(f"  • {v}" for v in violations)
             self._validation_label.setText(msg)
         else:
             self._validation_label.setText("")
@@ -324,7 +330,9 @@ class SettingsDialog(QDialog):
         else:
             # "Custom" selected manually — keep current colours
             self._current_template = "Custom"
-        self._reset_btn.setText(f"Reset to {self._current_template}")
+        self._reset_btn.setText(
+            tr("Reset to {tpl}").replace("{tpl}", self._current_template)
+        )
 
     # ------------------------------------------------------------------
     # Slots: buttons

@@ -3,12 +3,13 @@ ff_explorer.api.rest
 =====================
 FastAPI REST application over the shared ``service`` module.
 
-Routes (15 total, 14 POST + 1 GET)
+Routes (18 total, 17 POST + 1 GET)
 -----------------------------------
 GET  /health                            — liveness + version.
 
 Query (non-destructive):
 POST /entries                           — list matching entries with search/filter/content options.
+POST /list_with_report                  — list entries + skip report (SPEC-15).
 POST /metadata                          — entry metadata (path, type, size, mtime, exists).
 POST /listing                           — write a .txt listing (safe write).
 POST /duplicates                        — find duplicate files by content hash (FFX-I06).
@@ -18,6 +19,8 @@ Destructive (GUARDED — dry-run by default):
 POST /remove                            — remove matched entries; moves to recycle bin or version archive.
 POST /compress                          — compress matched entries; optionally version originals.
 POST /rename                            — batch rename matched entries.
+POST /copy                              — copy matched entries to a destination directory (SPEC-18).
+POST /move                              — move matched entries to a destination directory (SPEC-18).
 
 Presets (FFX-I03):
 POST /presets/save                      — save (upsert) a named preset.
@@ -189,6 +192,16 @@ class ListEntriesRequest(BaseModel):
             "Ignored when content_query is None."
         ),
     )
+    include_hidden: bool = Field(
+        default=True,
+        description=(
+            "SPEC-17: When True (default), hidden and system entries are included — "
+            "identical to pre-SPEC-17 behaviour (no regression).  When False, "
+            "hidden/system entries are excluded: POSIX dotfiles (names starting "
+            "with '.') and Windows entries marked FILE_ATTRIBUTE_HIDDEN or "
+            "FILE_ATTRIBUTE_SYSTEM.  Default True preserves the existing output exactly."
+        ),
+    )
 
     model_config = {
         "json_schema_extra": {
@@ -202,6 +215,9 @@ class ListEntriesRequest(BaseModel):
                 {"path": "C:/Users/me/Documents", "kind": 1,
                  "name_seed": "", "match_mode": "substring",
                  "min_size": 1024, "max_size": 10485760, "extensions": [".pdf", ".docx"]},
+                {"path": "C:/Users/me/Documents", "kind": 1,
+                 "name_seed": "", "include_hidden": False,
+                 "description": "Exclude dotfiles and hidden/system entries"},
             ]
         }
     }
@@ -746,6 +762,207 @@ class LargestEntriesResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Copy / move models — SPEC-18 (gated destructive)
+# ---------------------------------------------------------------------------
+
+class TransferReportResponse(BaseModel):
+    """Result of POST /copy and POST /move.
+
+    Shape mirrors :class:`~ff_explorer.core.TransferReport`:
+
+    * ``kind``        — ``"copy"`` or ``"move"`` — discriminates the operation.
+    * ``matched``     — all paths that matched the filter (source side).
+    * ``transferred`` — paths successfully copied/moved (empty on dry_run).
+    * ``failed``      — ``[(source_path, error_message), ...]``.
+    * ``dry_run``     — mirrors the request *dry_run* flag.
+    * ``destination`` — the destination directory used (str), or ``null`` on
+                        dry_run.
+    * ``would_affect`` — alias for ``matched`` (preview list, same semantics
+                          as on :class:`RemoveResponse`).
+    """
+    kind: str
+    dry_run: bool
+    matched: list[str]
+    transferred: list[str]
+    failed: list[tuple[str, str]]
+    destination: str | None = None
+    would_affect: list[str]
+
+
+class CopyRequest(BaseModel):
+    """Body for POST /copy.
+
+    Dry-run default
+    ~~~~~~~~~~~~~~~
+    Omitting ``dry_run`` / ``confirm`` (or sending ``dry_run: true``) returns
+    the preview list without touching the filesystem.
+
+    To actually copy, send **both**:
+      - ``"dry_run": false``
+      - ``"confirm": true``
+    """
+    path: str
+    kind: int = Field(..., ge=0, le=1, description="0=FOLDERS, 1=FILES")
+    name_seed: str = Field(
+        ...,
+        min_length=1,
+        description="Non-empty seed required — empty seed would match everything",
+    )
+    case_sensitive: bool = True
+    match_mode: Literal["substring", "glob", "regex"] = Field(
+        default="substring",
+        description="Name-matching strategy: 'substring' (default), 'glob', or 'regex'.",
+    )
+    destination: str = Field(
+        ...,
+        min_length=1,
+        description=(
+            "Target directory path (non-empty, required).  Created with parents "
+            "if it does not exist.  Must not be inside the source *path*."
+        ),
+    )
+    dry_run: bool = Field(
+        default=True,
+        description="When true (default) return a preview list; nothing is copied.",
+    )
+    confirm: bool = Field(
+        default=False,
+        description=(
+            "Explicit opt-in token.  Must be true together with dry_run=false "
+            "to actually copy entries.  Has no effect when dry_run=true."
+        ),
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "summary": "Preview (safe, default)",
+                    "value": {
+                        "path": "C:/tmp/src", "kind": 1, "name_seed": "report",
+                        "destination": "C:/tmp/dst",
+                        "dry_run": True, "confirm": False,
+                    },
+                },
+                {
+                    "summary": "Actually copy (requires both flags)",
+                    "value": {
+                        "path": "C:/tmp/src", "kind": 1, "name_seed": "report",
+                        "destination": "C:/tmp/dst",
+                        "dry_run": False, "confirm": True,
+                    },
+                },
+            ]
+        }
+    }
+
+
+class MoveRequest(BaseModel):
+    """Body for POST /move.
+
+    Dry-run default
+    ~~~~~~~~~~~~~~~
+    Omitting ``dry_run`` / ``confirm`` (or sending ``dry_run: true``) returns
+    the preview list without touching the filesystem.
+
+    To actually move, send **both**:
+      - ``"dry_run": false``
+      - ``"confirm": true``
+    """
+    path: str
+    kind: int = Field(..., ge=0, le=1, description="0=FOLDERS, 1=FILES")
+    name_seed: str = Field(
+        ...,
+        min_length=1,
+        description="Non-empty seed required — empty seed would match everything",
+    )
+    case_sensitive: bool = True
+    match_mode: Literal["substring", "glob", "regex"] = Field(
+        default="substring",
+        description="Name-matching strategy: 'substring' (default), 'glob', or 'regex'.",
+    )
+    destination: str = Field(
+        ...,
+        min_length=1,
+        description=(
+            "Target directory path (non-empty, required).  Created with parents "
+            "if it does not exist.  Must not be inside the source *path*."
+        ),
+    )
+    dry_run: bool = Field(
+        default=True,
+        description="When true (default) return a preview list; nothing is moved.",
+    )
+    confirm: bool = Field(
+        default=False,
+        description=(
+            "Explicit opt-in token.  Must be true together with dry_run=false "
+            "to actually move entries.  Has no effect when dry_run=true."
+        ),
+    )
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "summary": "Preview (safe, default)",
+                    "value": {
+                        "path": "C:/tmp/src", "kind": 1, "name_seed": "report",
+                        "destination": "C:/tmp/dst",
+                        "dry_run": True, "confirm": False,
+                    },
+                },
+                {
+                    "summary": "Actually move (requires both flags)",
+                    "value": {
+                        "path": "C:/tmp/src", "kind": 1, "name_seed": "report",
+                        "destination": "C:/tmp/dst",
+                        "dry_run": False, "confirm": True,
+                    },
+                },
+            ]
+        }
+    }
+
+
+# ---------------------------------------------------------------------------
+# List-with-report models — SPEC-15
+# ---------------------------------------------------------------------------
+
+class SkippedEntryOut(BaseModel):
+    """A single entry skipped during the walk due to a recoverable error.
+
+    Serialisable form of :class:`~ff_explorer.core.SkippedEntry`.
+    """
+    path: str = Field(..., description="Path that could not be accessed.")
+    reason: str = Field(
+        ...,
+        description=(
+            "Human-readable description of why the entry was skipped "
+            "(e.g. 'PermissionError: [Errno 13] Permission denied: ...')."
+        ),
+    )
+
+
+class ListWithReportResponse(BaseModel):
+    """Result of POST /list_with_report.
+
+    Bundles the matched entries with a (possibly empty) list of paths that
+    were skipped due to recoverable errors encountered during the walk.
+
+    * ``entries`` — matched entries (same shape as POST /entries).
+    * ``skipped`` — entries that could not be accessed; empty list when the
+                    walk completed without errors.
+    * ``count``   — ``len(entries)``.
+    * ``skipped_count`` — ``len(skipped)``.
+    """
+    entries: list[MatchEntryOut]
+    skipped: list[SkippedEntryOut]
+    count: int
+    skipped_count: int
+
+
+# ---------------------------------------------------------------------------
 # Index lifecycle models — FFX-I10
 # ---------------------------------------------------------------------------
 
@@ -850,6 +1067,7 @@ def post_list_entries(body: ListEntriesRequest) -> ListEntriesResponse:
             search_archives=body.search_archives,
             content_query=body.content_query,
             content_max_bytes=body.content_max_bytes,
+            include_hidden=body.include_hidden,
         )
     except ValueError as exc:
         raise _value_error_to_422(exc) from exc
@@ -1066,6 +1284,167 @@ def post_rename(body: RenameRequest) -> RenameResponse:
         collisions=report.collisions,
         failed=report.failed,
         undo_file=report.undo_file,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Routes — copy / move (SPEC-18, gated destructive)
+# ---------------------------------------------------------------------------
+
+@app.post(
+    "/copy",
+    response_model=TransferReportResponse,
+    summary="Copy matching entries to a destination directory (GUARDED — dry-run by default)",
+    tags=["destructive"],
+)
+def post_copy(body: CopyRequest) -> TransferReportResponse:
+    """Walk *path*, filter by *name_seed*, and optionally copy matched entries
+    to *destination*.
+
+    **Default behaviour (safe):** ``dry_run=true`` — returns the would-affect
+    preview list without touching the filesystem.
+
+    **To actually copy:** send ``"dry_run": false`` AND ``"confirm": true``
+    in the request body.  Both flags are required simultaneously.
+
+    Empty ``name_seed`` is always rejected (HTTP 422, ``EmptySeedError``).
+    *destination* must not be inside *path* (recursion guard — HTTP 422).
+
+    Raises HTTP 422 on ``EmptySeedError``, missing confirm flag, or bad paths.
+    Raises HTTP 404 if *path* does not exist or is not a directory.
+    """
+    try:
+        report = service.copy_entries(
+            body.path, body.kind, body.name_seed,
+            destination=body.destination,
+            case_sensitive=body.case_sensitive,
+            match_mode=body.match_mode,
+            dry_run=body.dry_run,
+            confirm=body.confirm,
+        )
+    except EmptySeedError as exc:
+        raise _empty_seed_to_422(exc) from exc
+    except FileNotFoundError as exc:
+        raise _not_found_to_404(exc) from exc
+    except ValueError as exc:
+        raise _value_error_to_422(exc) from exc
+    return TransferReportResponse(
+        kind=report.kind,
+        dry_run=report.dry_run,
+        matched=[str(p) for p in report.matched],
+        transferred=[str(p) for p in report.transferred],
+        failed=[(str(p), msg) for p, msg in report.failed],
+        destination=report.destination,
+        would_affect=[str(p) for p in report.would_affect],
+    )
+
+
+@app.post(
+    "/move",
+    response_model=TransferReportResponse,
+    summary="Move matching entries to a destination directory (GUARDED — dry-run by default)",
+    tags=["destructive"],
+)
+def post_move(body: MoveRequest) -> TransferReportResponse:
+    """Walk *path*, filter by *name_seed*, and optionally move matched entries
+    to *destination*.
+
+    **Default behaviour (safe):** ``dry_run=true`` — returns the would-affect
+    preview list without touching the filesystem.
+
+    **To actually move:** send ``"dry_run": false`` AND ``"confirm": true``
+    in the request body.  Both flags are required simultaneously.
+
+    Empty ``name_seed`` is always rejected (HTTP 422, ``EmptySeedError``).
+    *destination* must not be inside *path* (recursion guard — HTTP 422).
+
+    Raises HTTP 422 on ``EmptySeedError``, missing confirm flag, or bad paths.
+    Raises HTTP 404 if *path* does not exist or is not a directory.
+    """
+    try:
+        report = service.move_entries(
+            body.path, body.kind, body.name_seed,
+            destination=body.destination,
+            case_sensitive=body.case_sensitive,
+            match_mode=body.match_mode,
+            dry_run=body.dry_run,
+            confirm=body.confirm,
+        )
+    except EmptySeedError as exc:
+        raise _empty_seed_to_422(exc) from exc
+    except FileNotFoundError as exc:
+        raise _not_found_to_404(exc) from exc
+    except ValueError as exc:
+        raise _value_error_to_422(exc) from exc
+    return TransferReportResponse(
+        kind=report.kind,
+        dry_run=report.dry_run,
+        matched=[str(p) for p in report.matched],
+        transferred=[str(p) for p in report.transferred],
+        failed=[(str(p), msg) for p, msg in report.failed],
+        destination=report.destination,
+        would_affect=[str(p) for p in report.would_affect],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Routes — list with skip report (SPEC-15, non-destructive)
+# ---------------------------------------------------------------------------
+
+@app.post(
+    "/list_with_report",
+    response_model=ListWithReportResponse,
+    summary="List matching entries and return a skip report",
+    tags=["query"],
+)
+def post_list_with_report(body: ListEntriesRequest) -> ListWithReportResponse:
+    """Recursively walk *path* and return matched entries together with a skip
+    report for any paths that could not be accessed due to recoverable errors.
+
+    This is a superset of ``POST /entries``: the entries list is identical to
+    what ``POST /entries`` returns with the same parameters, and ``skipped``
+    surfaces any ``PermissionError`` / ``OSError`` paths that were silently
+    skipped during the walk.
+
+    The existing ``POST /entries`` endpoint is **unchanged** (back-compat).
+
+    Non-destructive — safe to call with any seed including empty (which matches
+    everything).  No dry_run/confirm gate.
+
+    Raises HTTP 422 if *path* is not a directory or other validation fails.
+    """
+    try:
+        result = service.list_entries_with_report(
+            body.path, body.kind, body.name_seed,
+            case_sensitive=body.case_sensitive,
+            match_mode=body.match_mode,
+            min_size=body.min_size,
+            max_size=body.max_size,
+            modified_after=body.modified_after,
+            modified_before=body.modified_before,
+            extensions=body.extensions,
+            respect_ignore=body.respect_ignore,
+            ignore_globs=body.ignore_globs,
+            search_archives=body.search_archives,
+            content_query=body.content_query,
+            content_max_bytes=body.content_max_bytes,
+            include_hidden=body.include_hidden,
+        )
+    except ValueError as exc:
+        raise _value_error_to_422(exc) from exc
+    entries_out = [
+        MatchEntryOut(path=str(e.path), kind=int(e.kind), in_archive=e.in_archive)
+        for e in result.entries
+    ]
+    skipped_out = [
+        SkippedEntryOut(path=s.path, reason=s.reason)
+        for s in result.skipped
+    ]
+    return ListWithReportResponse(
+        entries=entries_out,
+        skipped=skipped_out,
+        count=len(entries_out),
+        skipped_count=len(skipped_out),
     )
 
 

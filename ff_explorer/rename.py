@@ -30,12 +30,15 @@ Headless purity: this module imports NO tkinter / PySide6 / fastapi / fastmcp.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from ff_explorer.core import (
     EntryKind,
@@ -423,6 +426,8 @@ def rename_entries(
             report.renamed.append((str(old_path), str(new_path)))
             undo_map[str(new_path)] = str(old_path)
         except OSError as exc:
+            logger.warning("rename: failed for %s -> %s: %s",
+                           old_path, new_path, exc)
             report.failed.append((str(old_path), str(exc)))
 
     # Write undo file only if at least one rename succeeded
@@ -485,8 +490,10 @@ def replay_undo(undo_file: str | Path) -> list[tuple[str, str]]:
         old_path = Path(old_path_str)
         try:
             new_path.rename(old_path)
-        except OSError:
-            pass  # best-effort; caller receives the full pair list
+        except OSError as exc:
+            # best-effort; caller receives the full pair list
+            logger.warning("rename: undo failed for %s -> %s: %s",
+                           new_path_str, old_path_str, exc)
         results.append((new_path_str, old_path_str))
 
     return results

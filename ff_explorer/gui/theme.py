@@ -323,6 +323,12 @@ QLabel {{
     color: {t.label_text};
     background-color: transparent;
 }}
+QLabel#sectionLabel {{
+    background-color: {t.header_bg};
+    color: {t.accent};
+    font: bold 12pt Arial;
+    padding: 4px;
+}}
 
 /* ---- Buttons ---- */
 QPushButton {{
@@ -343,6 +349,22 @@ QPushButton:disabled {{
 }}
 QPushButton:pressed {{
     background-color: {t.button_hover_bg};
+}}
+QPushButton:focus {{
+    border-color: {t.accent};
+    outline: none;
+}}
+QPushButton#runButton {{
+    background-color: {t.button_bg};
+    color: {t.button_text};
+    font: bold 12pt Arial;
+    padding: 6px 10px;
+    border: 1px solid {t.button_border};
+    border-radius: 4px;
+}}
+QPushButton#runButton:hover {{
+    background-color: {t.button_hover_bg};
+    border-color: {t.accent};
 }}
 
 /* ---- Input fields ---- */
@@ -373,6 +395,10 @@ QComboBox {{
 QComboBox:hover {{
     border-color: {t.accent};
 }}
+QComboBox:focus {{
+    border-color: {t.accent};
+    outline: none;
+}}
 QComboBox QAbstractItemView {{
     background-color: {t.panel_bg};
     color: {t.text_primary};
@@ -395,6 +421,16 @@ QCheckBox {{
 }}
 QCheckBox:disabled {{
     color: {t.disabled_text};
+}}
+QCheckBox:focus {{
+    outline: 1px solid {t.accent};
+}}
+QRadioButton:focus {{
+    outline: 1px solid {t.accent};
+}}
+QSpinBox:focus {{
+    border-color: {t.accent};
+    outline: none;
 }}
 
 /* ---- List / Tree / Table views ---- */

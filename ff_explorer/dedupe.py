@@ -23,9 +23,12 @@ No tkinter / PySide6 / fastapi / fastmcp imports — headless, stdlib only.
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 from collections import defaultdict
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "DuplicateGroup",
@@ -121,7 +124,8 @@ def find_duplicates(
             fpath = os.path.join(dirpath, fname)
             try:
                 fsize = os.path.getsize(fpath)
-            except OSError:
+            except OSError as exc:
+                logger.debug("dedupe: skipping unreadable file %s: %s", fpath, exc)
                 continue  # unreadable stat — skip
             if fsize < min_size:
                 continue
@@ -179,5 +183,6 @@ def _hash_file(path: str, algo: str) -> str | None:
             while chunk := fh.read(_CHUNK):
                 h.update(chunk)
         return h.hexdigest()
-    except OSError:
+    except OSError as exc:
+        logger.debug("dedupe: skipping unhashable file %s: %s", path, exc)
         return None

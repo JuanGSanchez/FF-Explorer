@@ -29,11 +29,17 @@ from ff_explorer.core import (
     EntryKind,
     FFExplorerError,
     InvalidRegexError,
+    TransferReport,
+    EmptySeedError,
     entry_metadata,
     list_entries,
+    list_entries_with_report,
+    iter_entries,
     save_listing,
     remove_entries,
     compress_entries,
+    copy_entries,
+    move_entries,
 )
 
 
@@ -1404,3 +1410,676 @@ class TestLargestEntries:
         )
         assert result.returncode == 0
         assert result.stdout.strip() == "[]", f"Unwanted imports: {result.stdout}"
+
+
+# ===========================================================================
+# SPEC-17 — include_hidden toggle
+# ===========================================================================
+
+@pytest.fixture()
+def hidden_tree(tmp_path: Path) -> Path:
+    """Tree with a dotfile, a normal file, and a dot-prefixed subdirectory.
+
+        tmp_path/
+            normal.txt        (visible)
+            .hidden.txt       (hidden — dotfile)
+            .hidden_dir/      (hidden directory)
+                inside.txt    (inside hidden dir)
+            subdir/           (visible directory)
+    """
+    (tmp_path / "normal.txt").write_text("visible")
+    (tmp_path / ".hidden.txt").write_text("hidden")
+    hdir = tmp_path / ".hidden_dir"
+    hdir.mkdir()
+    (hdir / "inside.txt").write_text("inside hidden dir")
+    subdir = tmp_path / "subdir"
+    subdir.mkdir()
+    return tmp_path
+
+
+class TestIncludeHiddenFiles:
+    """SPEC-17: include_hidden=True (default) vs include_hidden=False for files."""
+
+    def test_default_true_returns_both(self, hidden_tree):
+        """Default include_hidden=True must return both normal and dotfiles."""
+        results = list_entries(hidden_tree, EntryKind.FILES, "")
+        names = {e.path.name for e in results}
+        assert "normal.txt" in names
+        assert ".hidden.txt" in names
+
+    def test_explicit_true_returns_both(self, hidden_tree):
+        """Explicit include_hidden=True is identical to the default."""
+        default = list_entries(hidden_tree, EntryKind.FILES, "")
+        explicit = list_entries(hidden_tree, EntryKind.FILES, "", include_hidden=True)
+        assert {e.path for e in default} == {e.path for e in explicit}
+
+    def test_false_excludes_dotfile(self, hidden_tree):
+        """include_hidden=False must exclude dotfiles."""
+        results = list_entries(hidden_tree, EntryKind.FILES, "", include_hidden=False)
+        names = {e.path.name for e in results}
+        assert "normal.txt" in names
+        assert ".hidden.txt" not in names
+
+    def test_false_excludes_files_inside_hidden_dir(self, hidden_tree):
+        """Files inside a hidden directory are reachable by the walk but the
+        directory itself is excluded from FOLDERS results; files inside it are
+        still reachable via os.walk (the dir is not pruned). The hidden *file*
+        inside is excluded only when its own name starts with a dot. Here
+        inside.txt is NOT a dotfile so it IS visible when include_hidden=False
+        (the filter acts on entry name, not parent directory name)."""
+        results = list_entries(hidden_tree, EntryKind.FILES, "", include_hidden=False)
+        names = {e.path.name for e in results}
+        # inside.txt is not a dotfile itself — it passes include_hidden=False
+        assert "inside.txt" in names
+
+    def test_name_seed_combined_with_hidden_false(self, hidden_tree):
+        """Name filter + include_hidden=False: only non-hidden entries matching seed."""
+        results = list_entries(hidden_tree, EntryKind.FILES, "hidden",
+                               include_hidden=False)
+        names = {e.path.name for e in results}
+        # ".hidden.txt" name contains "hidden" but is a dotfile → excluded
+        assert ".hidden.txt" not in names
+        # "normal.txt" doesn't contain "hidden" → also not present
+        assert "normal.txt" not in names
+
+    def test_no_regression_default_includes_hidden(self, hidden_tree):
+        """Regression: with defaults, hidden files must be present (no behaviour change)."""
+        results = list_entries(hidden_tree, EntryKind.FILES, "")
+        names = {e.path.name for e in results}
+        assert ".hidden.txt" in names, (
+            "Regression: default include_hidden=True must include dotfiles"
+        )
+
+
+class TestIncludeHiddenFolders:
+    """SPEC-17: include_hidden toggle for directories (FOLDERS kind)."""
+
+    def test_default_true_returns_hidden_dir(self, hidden_tree):
+        """Default include_hidden=True includes dot-prefixed directories."""
+        results = list_entries(hidden_tree, EntryKind.FOLDERS, "")
+        names = {e.path.name for e in results}
+        assert ".hidden_dir" in names
+        assert "subdir" in names
+
+    def test_false_excludes_hidden_dir(self, hidden_tree):
+        """include_hidden=False excludes dot-prefixed directories."""
+        results = list_entries(hidden_tree, EntryKind.FOLDERS, "", include_hidden=False)
+        names = {e.path.name for e in results}
+        assert "subdir" in names
+        assert ".hidden_dir" not in names
+
+    def test_no_regression_folder_default(self, hidden_tree):
+        """Regression: default still returns hidden dirs."""
+        with_default = list_entries(hidden_tree, EntryKind.FOLDERS, "")
+        with_true = list_entries(hidden_tree, EntryKind.FOLDERS, "", include_hidden=True)
+        assert {e.path for e in with_default} == {e.path for e in with_true}
+
+
+class TestIncludeHiddenIterAndReport:
+    """SPEC-17: include_hidden threads through iter_entries and list_entries_with_report."""
+
+    def test_iter_entries_include_hidden_false(self, hidden_tree):
+        results = list(iter_entries(hidden_tree, EntryKind.FILES, "",
+                                    include_hidden=False))
+        names = {e.path.name for e in results}
+        assert ".hidden.txt" not in names
+        assert "normal.txt" in names
+
+    def test_list_entries_with_report_include_hidden_false(self, hidden_tree):
+        report = list_entries_with_report(hidden_tree, EntryKind.FILES, "",
+                                          include_hidden=False)
+        names = {e.path.name for e in report.entries}
+        assert ".hidden.txt" not in names
+        assert "normal.txt" in names
+
+    def test_list_entries_with_report_default_includes_hidden(self, hidden_tree):
+        report = list_entries_with_report(hidden_tree, EntryKind.FILES, "")
+        names = {e.path.name for e in report.entries}
+        assert ".hidden.txt" in names
+
+
+# ===========================================================================
+# SPEC-18 — copy_entries / move_entries (core half)
+# ===========================================================================
+
+@pytest.fixture()
+def transfer_tree(tmp_path: Path) -> Path:
+    """Source tree for copy/move tests.
+
+        tmp_path/src/
+            alpha.txt
+            beta.txt
+            gamma.log
+            sub_dir/
+                delta.txt
+    """
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "alpha.txt").write_text("alpha")
+    (src / "beta.txt").write_text("beta")
+    (src / "gamma.log").write_text("gamma")
+    sub = src / "sub_dir"
+    sub.mkdir()
+    (sub / "delta.txt").write_text("delta")
+    return tmp_path  # return root so tests can make dest outside src
+
+
+class TestTransferReport:
+    """TransferReport dataclass shape and defaults."""
+
+    def test_default_dry_run(self):
+        r = TransferReport()
+        assert r.dry_run is True
+        assert r.kind == "copy"
+        assert r.matched == []
+        assert r.transferred == []
+        assert r.failed == []
+        assert r.destination is None
+
+    def test_would_affect_alias(self):
+        paths = [Path("/a"), Path("/b")]
+        r = TransferReport(matched=paths)
+        assert r.would_affect is r.matched
+
+
+class TestCopyEntriesDryRun:
+    """copy_entries dry_run=True: preview only, nothing copied."""
+
+    def test_dry_run_default_copies_nothing(self, transfer_tree):
+        src = transfer_tree / "src"
+        dest = transfer_tree / "dest"
+        report = copy_entries(str(src), EntryKind.FILES, "alpha",
+                              destination=str(dest))
+        assert report.dry_run is True
+        assert report.transferred == []
+        assert not dest.exists(), "dest must not be created on dry_run"
+
+    def test_dry_run_reports_matched_set(self, transfer_tree):
+        src = transfer_tree / "src"
+        report = copy_entries(str(src), EntryKind.FILES, ".txt",
+                              destination=str(transfer_tree / "dest"))
+        assert report.dry_run is True
+        matched_names = {p.name for p in report.matched}
+        assert "alpha.txt" in matched_names
+        assert "beta.txt" in matched_names
+        assert "gamma.log" not in matched_names
+
+    def test_dry_run_originals_unchanged(self, transfer_tree):
+        src = transfer_tree / "src"
+        report = copy_entries(str(src), EntryKind.FILES, "alpha",
+                              destination=str(transfer_tree / "dest"))
+        assert report.dry_run is True
+        # Source file must still be there
+        assert (src / "alpha.txt").exists()
+
+
+class TestCopyEntriesLive:
+    """copy_entries dry_run=False + confirm=True: files/folders actually copied."""
+
+    def test_live_copy_files_exist_at_dest(self, transfer_tree):
+        src = transfer_tree / "src"
+        dest = transfer_tree / "dest"
+        report = copy_entries(str(src), EntryKind.FILES, ".txt",
+                              destination=str(dest),
+                              dry_run=False, confirm=True)
+        assert report.dry_run is False
+        assert (dest / "alpha.txt").exists()
+        assert (dest / "beta.txt").exists()
+        assert not (dest / "gamma.log").exists()
+
+    def test_live_copy_originals_preserved(self, transfer_tree):
+        src = transfer_tree / "src"
+        dest = transfer_tree / "dest"
+        copy_entries(str(src), EntryKind.FILES, "alpha",
+                     destination=str(dest), dry_run=False, confirm=True)
+        # Originals must still exist
+        assert (src / "alpha.txt").exists()
+
+    def test_live_copy_folders(self, transfer_tree):
+        src = transfer_tree / "src"
+        dest = transfer_tree / "dest"
+        report = copy_entries(str(src), EntryKind.FOLDERS, "sub",
+                              destination=str(dest), dry_run=False, confirm=True)
+        assert (dest / "sub_dir").is_dir()
+        assert (src / "sub_dir").is_dir(), "source dir must still exist after copy"
+
+    def test_destination_created_if_absent(self, transfer_tree):
+        src = transfer_tree / "src"
+        dest = transfer_tree / "new" / "nested" / "dest"
+        assert not dest.exists()
+        copy_entries(str(src), EntryKind.FILES, "alpha",
+                     destination=str(dest), dry_run=False, confirm=True)
+        assert dest.exists()
+
+    def test_destination_in_report(self, transfer_tree):
+        src = transfer_tree / "src"
+        dest = transfer_tree / "dest"
+        report = copy_entries(str(src), EntryKind.FILES, "alpha",
+                              destination=str(dest), dry_run=False, confirm=True)
+        assert report.destination == str(dest.resolve())
+
+    def test_per_item_failure_reported_batch_continues(self, transfer_tree):
+        """A per-item OSError is collected into failed; other items still copied."""
+        from unittest.mock import patch as _patch
+        src = transfer_tree / "src"
+        dest = transfer_tree / "dest"
+        dest.mkdir(parents=True)
+
+        # Inject an OSError for the first copy2 call (alpha.txt) only;
+        # subsequent calls (beta.txt) proceed normally.
+        real_copy2 = __import__("shutil").copy2
+        call_count = {"n": 0}
+
+        def _selective_fail(s, d, **kw):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                raise OSError("injected failure for alpha.txt")
+            return real_copy2(s, d, **kw)
+
+        with _patch("ff_explorer.core.shutil.copy2", side_effect=_selective_fail):
+            report = copy_entries(str(src), EntryKind.FILES, ".txt",
+                                  destination=str(dest), dry_run=False, confirm=True)
+
+        # first item failed → reported; second item (beta.txt) copied normally
+        assert len(report.failed) >= 1
+        assert (dest / "beta.txt").exists(), "beta.txt must be copied despite alpha failure"
+
+
+class TestCopyEntriesGate:
+    """copy_entries safety gate: empty seed and confirm requirement."""
+
+    def test_empty_seed_raises_empty_seed_error(self, transfer_tree):
+        src = transfer_tree / "src"
+        with pytest.raises(EmptySeedError):
+            copy_entries(str(src), EntryKind.FILES, "",
+                         destination=str(transfer_tree / "dest"))
+
+    def test_whitespace_seed_raises(self, transfer_tree):
+        src = transfer_tree / "src"
+        with pytest.raises(EmptySeedError):
+            copy_entries(str(src), EntryKind.FILES, "   ",
+                         destination=str(transfer_tree / "dest"))
+
+    def test_no_confirm_with_dry_run_false_raises(self, transfer_tree):
+        src = transfer_tree / "src"
+        with pytest.raises(ValueError):
+            copy_entries(str(src), EntryKind.FILES, "alpha",
+                         destination=str(transfer_tree / "dest"),
+                         dry_run=False, confirm=False)
+
+    def test_destination_inside_source_raises(self, transfer_tree):
+        src = transfer_tree / "src"
+        dest_inside = src / "nested_dest"
+        with pytest.raises(ValueError, match="recursion"):
+            copy_entries(str(src), EntryKind.FILES, "alpha",
+                         destination=str(dest_inside),
+                         dry_run=False, confirm=True)
+
+
+class TestMoveEntriesDryRun:
+    """move_entries dry_run=True: preview only, nothing moved."""
+
+    def test_dry_run_default_moves_nothing(self, transfer_tree):
+        src = transfer_tree / "src"
+        dest = transfer_tree / "dest"
+        report = move_entries(str(src), EntryKind.FILES, "alpha",
+                              destination=str(dest))
+        assert report.dry_run is True
+        assert report.transferred == []
+        assert (src / "alpha.txt").exists(), "source must remain on dry_run"
+        assert not dest.exists(), "dest must not be created on dry_run"
+
+    def test_dry_run_reports_matched_set(self, transfer_tree):
+        src = transfer_tree / "src"
+        report = move_entries(str(src), EntryKind.FILES, ".txt",
+                              destination=str(transfer_tree / "dest"))
+        matched_names = {p.name for p in report.matched}
+        assert "alpha.txt" in matched_names
+        assert "beta.txt" in matched_names
+        assert "gamma.log" not in matched_names
+
+
+class TestMoveEntriesLive:
+    """move_entries dry_run=False + confirm=True: files/folders actually moved."""
+
+    def test_live_move_files_exist_at_dest(self, transfer_tree):
+        src = transfer_tree / "src"
+        dest = transfer_tree / "dest"
+        report = move_entries(str(src), EntryKind.FILES, "alpha",
+                              destination=str(dest), dry_run=False, confirm=True)
+        assert report.dry_run is False
+        assert (dest / "alpha.txt").exists()
+
+    def test_live_move_originals_gone(self, transfer_tree):
+        src = transfer_tree / "src"
+        dest = transfer_tree / "dest"
+        move_entries(str(src), EntryKind.FILES, "alpha",
+                     destination=str(dest), dry_run=False, confirm=True)
+        assert not (src / "alpha.txt").exists(), "original must be gone after move"
+
+    def test_live_move_folders(self, transfer_tree):
+        src = transfer_tree / "src"
+        dest = transfer_tree / "dest"
+        report = move_entries(str(src), EntryKind.FOLDERS, "sub",
+                              destination=str(dest), dry_run=False, confirm=True)
+        assert (dest / "sub_dir").is_dir()
+        assert not (src / "sub_dir").exists(), "source dir must be gone after move"
+
+    def test_destination_in_report(self, transfer_tree):
+        src = transfer_tree / "src"
+        dest = transfer_tree / "dest"
+        report = move_entries(str(src), EntryKind.FILES, "alpha",
+                              destination=str(dest), dry_run=False, confirm=True)
+        assert report.destination == str(dest.resolve())
+
+    def test_kind_discriminator_is_move(self, transfer_tree):
+        src = transfer_tree / "src"
+        dest = transfer_tree / "dest"
+        report = move_entries(str(src), EntryKind.FILES, "alpha",
+                              destination=str(dest), dry_run=False, confirm=True)
+        assert report.kind == "move"
+
+
+class TestMoveEntriesGate:
+    """move_entries safety gate: empty seed and confirm requirement."""
+
+    def test_empty_seed_raises(self, transfer_tree):
+        src = transfer_tree / "src"
+        with pytest.raises(EmptySeedError):
+            move_entries(str(src), EntryKind.FILES, "",
+                         destination=str(transfer_tree / "dest"))
+
+    def test_whitespace_seed_raises(self, transfer_tree):
+        src = transfer_tree / "src"
+        with pytest.raises(EmptySeedError):
+            move_entries(str(src), EntryKind.FILES, "  ",
+                         destination=str(transfer_tree / "dest"))
+
+    def test_no_confirm_with_dry_run_false_raises(self, transfer_tree):
+        src = transfer_tree / "src"
+        with pytest.raises(ValueError):
+            move_entries(str(src), EntryKind.FILES, "alpha",
+                         destination=str(transfer_tree / "dest"),
+                         dry_run=False, confirm=False)
+
+    def test_destination_inside_source_raises(self, transfer_tree):
+        src = transfer_tree / "src"
+        dest_inside = src / "nested_dest"
+        with pytest.raises(ValueError, match="recursion"):
+            move_entries(str(src), EntryKind.FILES, "alpha",
+                         destination=str(dest_inside),
+                         dry_run=False, confirm=True)
+
+
+# ===========================================================================
+# only_paths subset restriction (SPEC-18 multi-select)
+# ===========================================================================
+
+class TestOnlyPathsRemove:
+    """remove_entries with only_paths: subset deletion, no-widen, gate preserved."""
+
+    def test_only_paths_restricts_deletion(self, tmp_path):
+        """Only the intersected file is removed; the other seed-match survives."""
+        (tmp_path / "delete_me_a.txt").write_text("a")
+        (tmp_path / "delete_me_b.txt").write_text("b")
+
+        # Pass only the 'a' file as the subset
+        a_path = str(tmp_path / "delete_me_a.txt")
+        report = remove_entries(
+            tmp_path, EntryKind.FILES, "delete_me",
+            only_paths=[a_path],
+            dry_run=False, confirm=True,
+        )
+        assert not (tmp_path / "delete_me_a.txt").exists(), "a must be removed"
+        assert (tmp_path / "delete_me_b.txt").exists(), "b must survive"
+        matched_names = {Path(p).name for p in report.matched}
+        assert matched_names == {"delete_me_a.txt"}
+
+    def test_only_paths_dry_run_preview_reflects_subset(self, tmp_path):
+        """Dry-run preview shows the intersected subset, not the full match."""
+        (tmp_path / "delete_me_a.txt").write_text("a")
+        (tmp_path / "delete_me_b.txt").write_text("b")
+
+        a_path = str(tmp_path / "delete_me_a.txt")
+        report = remove_entries(
+            tmp_path, EntryKind.FILES, "delete_me",
+            only_paths=[a_path],
+            dry_run=True,
+        )
+        assert report.dry_run is True
+        matched_names = {Path(p).name for p in report.matched}
+        assert matched_names == {"delete_me_a.txt"}
+        assert "delete_me_b.txt" not in matched_names
+        # Nothing deleted
+        assert (tmp_path / "delete_me_a.txt").exists()
+        assert (tmp_path / "delete_me_b.txt").exists()
+
+    def test_only_paths_cannot_widen_action_set(self, tmp_path):
+        """A path in only_paths that is NOT in the seed-match is silently ignored."""
+        (tmp_path / "delete_me.txt").write_text("x")
+        (tmp_path / "keep.txt").write_text("y")
+
+        # only_paths contains 'keep.txt' which does NOT match seed "delete_me"
+        keep_path = str(tmp_path / "keep.txt")
+        report = remove_entries(
+            tmp_path, EntryKind.FILES, "delete_me",
+            only_paths=[keep_path],
+            dry_run=False, confirm=True,
+        )
+        # keep.txt must NOT have been removed (only_paths cannot widen)
+        assert (tmp_path / "keep.txt").exists(), "keep.txt must not be acted on"
+        # matched set is the intersection — empty since keep.txt not in seed-match
+        assert report.matched == []
+
+    def test_only_paths_none_is_full_set_regression(self, tmp_path):
+        """only_paths=None (default) acts on the full matched set — no regression."""
+        (tmp_path / "delete_me_a.txt").write_text("a")
+        (tmp_path / "delete_me_b.txt").write_text("b")
+
+        report = remove_entries(
+            tmp_path, EntryKind.FILES, "delete_me",
+            only_paths=None,
+            dry_run=True,
+        )
+        matched_names = {Path(p).name for p in report.matched}
+        assert "delete_me_a.txt" in matched_names
+        assert "delete_me_b.txt" in matched_names
+
+    def test_empty_seed_rejected_even_with_only_paths(self, tmp_path):
+        """The empty-seed gate fires before only_paths is considered."""
+        (tmp_path / "file.txt").write_text("x")
+        with pytest.raises(EmptySeedError):
+            remove_entries(
+                tmp_path, EntryKind.FILES, "",
+                only_paths=[str(tmp_path / "file.txt")],
+            )
+
+
+class TestOnlyPathsCompress:
+    """compress_entries with only_paths: subset compressed, rest untouched."""
+
+    def test_only_paths_restricts_compression(self, tmp_path):
+        """Only the selected file is compressed; the other seed-match survives."""
+        (tmp_path / "zip_me_a.txt").write_text("a" * 100)
+        (tmp_path / "zip_me_b.txt").write_text("b" * 100)
+
+        a_path = str(tmp_path / "zip_me_a.txt")
+        report = compress_entries(
+            tmp_path, EntryKind.FILES, "zip_me",
+            only_paths=[a_path],
+            dry_run=False, confirm=True,
+        )
+        # Original a deleted (compress removes originals); b survives untouched
+        assert not (tmp_path / "zip_me_a.txt").exists()
+        assert (tmp_path / "zip_me_b.txt").exists()
+        matched_names = {Path(p).name for p in report.matched}
+        assert matched_names == {"zip_me_a.txt"}
+
+    def test_only_paths_dry_run_preview_reflects_subset(self, tmp_path):
+        """Dry-run preview shows intersected subset for compress."""
+        (tmp_path / "zip_me_a.txt").write_text("a")
+        (tmp_path / "zip_me_b.txt").write_text("b")
+
+        a_path = str(tmp_path / "zip_me_a.txt")
+        report = compress_entries(
+            tmp_path, EntryKind.FILES, "zip_me",
+            only_paths=[a_path],
+            dry_run=True,
+        )
+        matched_names = {Path(p).name for p in report.matched}
+        assert matched_names == {"zip_me_a.txt"}
+        assert "zip_me_b.txt" not in matched_names
+
+    def test_empty_seed_rejected_even_with_only_paths(self, tmp_path):
+        """The empty-seed gate fires before only_paths is considered."""
+        (tmp_path / "file.txt").write_text("x")
+        with pytest.raises(EmptySeedError):
+            compress_entries(
+                tmp_path, EntryKind.FILES, "   ",
+                only_paths=[str(tmp_path / "file.txt")],
+            )
+
+
+class TestOnlyPathsCopy:
+    """copy_entries with only_paths: only selected entries transferred."""
+
+    def test_only_paths_restricts_copy(self, tmp_path):
+        """Only the selected file is copied; the other seed-match is not."""
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "alpha.txt").write_text("a")
+        (src / "beta.txt").write_text("b")
+        dest = tmp_path / "dest"
+
+        a_path = str(src / "alpha.txt")
+        report = copy_entries(
+            str(src), EntryKind.FILES, ".txt",
+            destination=str(dest),
+            only_paths=[a_path],
+            dry_run=False, confirm=True,
+        )
+        assert (dest / "alpha.txt").exists()
+        assert not (dest / "beta.txt").exists()
+        matched_names = {Path(p).name for p in report.matched}
+        assert matched_names == {"alpha.txt"}
+
+    def test_only_paths_cannot_widen_copy(self, tmp_path):
+        """A path not in seed-match is not copied."""
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "alpha.txt").write_text("a")
+        (src / "gamma.log").write_text("g")
+        dest = tmp_path / "dest"
+
+        # only_paths points to gamma.log which does NOT match seed ".txt"
+        gamma_path = str(src / "gamma.log")
+        report = copy_entries(
+            str(src), EntryKind.FILES, ".txt",
+            destination=str(dest),
+            only_paths=[gamma_path],
+            dry_run=False, confirm=True,
+        )
+        # dest created but gamma.log must not be there
+        assert not (dest / "gamma.log").exists()
+        assert report.matched == []
+
+    def test_only_paths_none_regression_copy(self, tmp_path):
+        """only_paths=None copies the full matched set — regression guard."""
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "alpha.txt").write_text("a")
+        (src / "beta.txt").write_text("b")
+        dest = tmp_path / "dest"
+
+        report = copy_entries(
+            str(src), EntryKind.FILES, ".txt",
+            destination=str(dest),
+            only_paths=None,
+            dry_run=True,
+        )
+        matched_names = {Path(p).name for p in report.matched}
+        assert "alpha.txt" in matched_names
+        assert "beta.txt" in matched_names
+
+    def test_empty_seed_rejected_even_with_only_paths_copy(self, tmp_path):
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "alpha.txt").write_text("a")
+        with pytest.raises(EmptySeedError):
+            copy_entries(
+                str(src), EntryKind.FILES, "",
+                destination=str(tmp_path / "dest"),
+                only_paths=[str(src / "alpha.txt")],
+            )
+
+
+class TestOnlyPathsMove:
+    """move_entries with only_paths: only selected entries moved."""
+
+    def test_only_paths_restricts_move(self, tmp_path):
+        """Only the selected file is moved; the other seed-match stays in place."""
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "alpha.txt").write_text("a")
+        (src / "beta.txt").write_text("b")
+        dest = tmp_path / "dest"
+
+        a_path = str(src / "alpha.txt")
+        report = move_entries(
+            str(src), EntryKind.FILES, ".txt",
+            destination=str(dest),
+            only_paths=[a_path],
+            dry_run=False, confirm=True,
+        )
+        assert (dest / "alpha.txt").exists()
+        assert not (src / "alpha.txt").exists(), "alpha must be gone from src"
+        assert (src / "beta.txt").exists(), "beta must remain in src"
+        matched_names = {Path(p).name for p in report.matched}
+        assert matched_names == {"alpha.txt"}
+
+    def test_only_paths_cannot_widen_move(self, tmp_path):
+        """A path not in seed-match is not moved."""
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "alpha.txt").write_text("a")
+        (src / "gamma.log").write_text("g")
+        dest = tmp_path / "dest"
+
+        gamma_path = str(src / "gamma.log")
+        report = move_entries(
+            str(src), EntryKind.FILES, ".txt",
+            destination=str(dest),
+            only_paths=[gamma_path],
+            dry_run=False, confirm=True,
+        )
+        assert (src / "gamma.log").exists(), "gamma.log must not be moved"
+        assert report.matched == []
+
+    def test_only_paths_none_regression_move(self, tmp_path):
+        """only_paths=None moves the full matched set — regression guard."""
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "alpha.txt").write_text("a")
+        (src / "beta.txt").write_text("b")
+        dest = tmp_path / "dest"
+
+        report = move_entries(
+            str(src), EntryKind.FILES, ".txt",
+            destination=str(dest),
+            only_paths=None,
+            dry_run=True,
+        )
+        matched_names = {Path(p).name for p in report.matched}
+        assert "alpha.txt" in matched_names
+        assert "beta.txt" in matched_names
+
+    def test_empty_seed_rejected_even_with_only_paths_move(self, tmp_path):
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "alpha.txt").write_text("a")
+        with pytest.raises(EmptySeedError):
+            move_entries(
+                str(src), EntryKind.FILES, "  ",
+                destination=str(tmp_path / "dest"),
+                only_paths=[str(src / "alpha.txt")],
+            )

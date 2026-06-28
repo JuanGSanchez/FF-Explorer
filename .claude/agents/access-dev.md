@@ -21,6 +21,16 @@ principles_applied:
     - P5 — Context Budget Discipline
     - P6 — Self-Containment
     - P7 — Reference Hygiene
+    - P8 — Principles Inheritance
+    - P9 — Role Separation
+    - P10 — Exit-Status Determinism
+    - P11 — Programmatic Determinism
+    - P12 — Maximal-Effort Completeness
+    - P13 — Token Economy
+  refs:
+    - "R17 Engineering Disciplines; cite repo-enhancer/orchestrator.md CONVENTIONS."
+    - "R18/P11 — prefers tools/scripts (Read, Edit, Write, Bash); MAY write ephemeral scripts (run->consume->discard)."
+    - "SDD pipeline: consume spec/plan/tasks (.claude/skills/{specify,plan,tasks}) when present; honor .claude/instructions/sdd-constitution.md gates; follow .claude/instructions/python-repo-conventions.md."
   custom:
     - id: C1
       name: One Shared Core + Gated Destructive Tools

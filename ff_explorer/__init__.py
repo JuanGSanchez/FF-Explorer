@@ -4,7 +4,13 @@ Juan García Sánchez, 2023-2026
 License: GPLv3
 """
 
+import logging
 from importlib.metadata import version, PackageNotFoundError
+
+# Library best-practice: attach a NullHandler to the top-level package logger
+# so that "No handlers could be found for logger 'ff_explorer'" warnings never
+# appear in applications that do not configure logging themselves.
+logging.getLogger(__name__).addHandler(logging.NullHandler())
 
 try:
     __version__: str = version("ff-explorer")
@@ -14,28 +20,44 @@ except PackageNotFoundError:  # package not installed (editable / dev environmen
 from ff_explorer.core import (
     EntryKind,
     MatchEntry,
+    SkippedEntry,
+    ListingResult,
     RemovalReport,
     CompressionReport,
+    TransferReport,
     FFExplorerError,
     EmptySeedError,
     list_entries,
+    iter_entries,
+    list_entries_with_report,
     entry_metadata,
     save_listing,
     remove_entries,
     compress_entries,
+    copy_entries,
+    move_entries,
+    configure_logging,
 )
 
 __all__ = [
     "__version__",
     "EntryKind",
     "MatchEntry",
+    "SkippedEntry",
+    "ListingResult",
     "RemovalReport",
     "CompressionReport",
+    "TransferReport",
     "FFExplorerError",
     "EmptySeedError",
     "list_entries",
+    "iter_entries",
+    "list_entries_with_report",
     "entry_metadata",
     "save_listing",
     "remove_entries",
     "compress_entries",
+    "copy_entries",
+    "move_entries",
+    "configure_logging",
 ]

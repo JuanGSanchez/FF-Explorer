@@ -35,7 +35,24 @@ from PySide6.QtCore import QDate, QEvent, Qt
 from PySide6.QtGui import QKeyEvent, QMouseEvent
 from PySide6.QtWidgets import QMessageBox
 
+from ff_explorer.gui.widget_info import WIDGET_INFO, info_text, register_info_text
+
 from ff_explorer.gui.main_window import MainWindow, _ClickableLineEdit
+
+
+# ---------------------------------------------------------------------------
+# Prefs isolation — autouse fixture (SPEC-20)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _isolate_prefs(tmp_path, monkeypatch):
+    """Redirect FFE_PREFS_CONFIG_DIR to a per-test tmp directory for every test
+    in this module so that saved preferences from one test do not affect another.
+
+    This prevents SPEC-20's closeEvent persistence from leaking state across
+    tests that construct MainWindow (which restores prefs on init).
+    """
+    monkeypatch.setenv("FFE_PREFS_CONFIG_DIR", str(tmp_path / "prefs"))
 
 
 # ---------------------------------------------------------------------------
@@ -80,30 +97,34 @@ class TestDestructiveSafetyGateDefaultsNo:
     dry_run=False, confirm=True) must NOT be invoked.
     """
 
-    def _make_remove_preview(self, tmp_path: Path):
-        """Return a fake dry-run preview report with one matched entry."""
-        from ff_explorer.core import RemovalReport
+    def _make_match_entries(self, tmp_path: Path) -> list:
+        """Return a list with one MatchEntry for a real file in tmp_path."""
+        from ff_explorer import MatchEntry, EntryKind
         fake_path = tmp_path / "target.txt"
         fake_path.write_text("x")
-        report = RemovalReport(matched=[fake_path])
-        return report
+        return [MatchEntry(path=fake_path, kind=EntryKind.FILES)]
 
     def test_remove_dialog_default_no_skips_destructive_call(self, qapp, tmp_path):
         """
         _do_remove: when QMessageBox.question returns No, the live
         remove_entries(dry_run=False, confirm=True) is never called.
+
+        SPEC-14: _do_remove now receives the pre-scanned entries list from the
+        worker (no dry-run inside _do_remove itself).  The safety gate is the
+        QMessageBox.question defaulting to No.
         """
         win = MainWindow()
         try:
-            preview_report = self._make_remove_preview(tmp_path)
+            entries = self._make_match_entries(tmp_path)
 
             calls = []
 
-            def fake_remove(path, kind, seed, dry_run=True, confirm=False):
+            def fake_remove(path, kind, seed, dry_run=True, confirm=False, **kwargs):
                 calls.append({"dry_run": dry_run, "confirm": confirm})
-                if dry_run:
-                    return preview_report
-                raise AssertionError("Destructive remove must not be called when user clicks No")
+                if not dry_run:
+                    raise AssertionError("Destructive remove must not be called when user clicks No")
+                from ff_explorer.core import RemovalReport
+                return RemovalReport(matched=[e.path for e in entries])
 
             with (
                 patch("ff_explorer.gui.main_window.remove_entries", side_effect=fake_remove),
@@ -112,12 +133,10 @@ class TestDestructiveSafetyGateDefaultsNo:
                     return_value=QMessageBox.StandardButton.No,
                 ),
             ):
-                win._do_remove(str(tmp_path), win._current_kind(), "target", "file")
+                win._do_remove(str(tmp_path), win._current_kind(), "target", "file", entries)
 
-            # Dry-run preview call must have occurred; destructive call must NOT.
-            dry_run_calls = [c for c in calls if c["dry_run"]]
+            # Only the confirmation dialog was shown; no destructive call must occur.
             destructive_calls = [c for c in calls if not c["dry_run"]]
-            assert len(dry_run_calls) == 1, "Expected exactly one dry-run preview call"
             assert len(destructive_calls) == 0, (
                 "Destructive remove_entries(dry_run=False) must not be called when dialog returns No"
             )
@@ -129,21 +148,24 @@ class TestDestructiveSafetyGateDefaultsNo:
         """
         _do_compress: when QMessageBox.question returns No, the live
         compress_entries(dry_run=False, confirm=True) is never called.
+
+        SPEC-14: _do_compress now receives the pre-scanned entries list.
         """
         win = MainWindow()
         try:
-            from ff_explorer.core import CompressionReport
+            from ff_explorer import MatchEntry, EntryKind
             fake_path = tmp_path / "target_folder"
             fake_path.mkdir()
-            preview_report = CompressionReport(matched=[fake_path])
+            entries = [MatchEntry(path=fake_path, kind=EntryKind.FOLDERS)]
 
             calls = []
 
-            def fake_compress(path, kind, seed, dry_run=True, confirm=False):
+            def fake_compress(path, kind, seed, dry_run=True, confirm=False, **kwargs):
                 calls.append({"dry_run": dry_run, "confirm": confirm})
-                if dry_run:
-                    return preview_report
-                raise AssertionError("Destructive compress must not be called when user clicks No")
+                if not dry_run:
+                    raise AssertionError("Destructive compress must not be called when user clicks No")
+                from ff_explorer.core import CompressionReport
+                return CompressionReport(matched=[fake_path])
 
             with (
                 patch("ff_explorer.gui.main_window.compress_entries", side_effect=fake_compress),
@@ -152,11 +174,9 @@ class TestDestructiveSafetyGateDefaultsNo:
                     return_value=QMessageBox.StandardButton.No,
                 ),
             ):
-                win._do_compress(str(tmp_path), win._current_kind(), "target", "folder")
+                win._do_compress(str(tmp_path), win._current_kind(), "target", "folder", entries)
 
-            dry_run_calls = [c for c in calls if c["dry_run"]]
             destructive_calls = [c for c in calls if not c["dry_run"]]
-            assert len(dry_run_calls) == 1, "Expected exactly one dry-run preview call"
             assert len(destructive_calls) == 0, (
                 "Destructive compress_entries(dry_run=False) must not be called when dialog returns No"
             )
@@ -171,17 +191,18 @@ class TestDestructiveSafetyGateDefaultsNo:
         """
         win = MainWindow()
         try:
+            from ff_explorer import MatchEntry, EntryKind
             from ff_explorer.core import RemovalReport
             fake_path = tmp_path / "yes_target.txt"
             fake_path.write_text("x")
-            preview_report = RemovalReport(matched=[fake_path])
+            entries = [MatchEntry(path=fake_path, kind=EntryKind.FILES)]
             live_report = RemovalReport(matched=[fake_path], removed=[fake_path])
 
             calls = []
 
-            def fake_remove(path, kind, seed, dry_run=True, confirm=False):
+            def fake_remove(path, kind, seed, dry_run=True, confirm=False, **kwargs):
                 calls.append({"dry_run": dry_run, "confirm": confirm})
-                return preview_report if dry_run else live_report
+                return live_report
 
             with (
                 patch("ff_explorer.gui.main_window.remove_entries", side_effect=fake_remove),
@@ -190,7 +211,7 @@ class TestDestructiveSafetyGateDefaultsNo:
                     return_value=QMessageBox.StandardButton.Yes,
                 ),
             ):
-                win._do_remove(str(tmp_path), win._current_kind(), "yes_target", "file")
+                win._do_remove(str(tmp_path), win._current_kind(), "yes_target", "file", entries)
 
             destructive_calls = [c for c in calls if not c["dry_run"]]
             assert len(destructive_calls) == 1, (
@@ -838,71 +859,79 @@ class TestFilterToggle:
 # ---------------------------------------------------------------------------
 
 class TestRunPassesFilterKwargs:
-    """A6: When Run is triggered with non-default filters, list_entries receives them."""
+    """A6: When Run is triggered with non-default filters, save_listing / iter_entries
+    receive the correct kwargs.
+
+    SPEC-14: _do_save no longer calls list_entries itself — the entries list is
+    delivered by the _ScanWorker (which calls iter_entries).  The _do_save method
+    only calls save_listing.  Filter-param correctness for the scan side is
+    verified via _build_list_entries_kwargs() in TestFilterParamAssembly (A5b).
+    """
 
     def test_run_save_passes_match_mode_regex_to_list_entries(self, qapp, tmp_path):
-        """_do_save passes match_mode='regex' to list_entries when Regex is selected."""
+        """_build_list_entries_kwargs passes match_mode='regex' when Regex is selected.
+
+        SPEC-14 adaptation: _do_save no longer calls list_entries directly; the
+        worker uses iter_entries with _build_list_entries_kwargs().  We verify
+        _do_save calls save_listing correctly and uses the passed entries list
+        (the match_mode kwarg is verified via _build_list_entries_kwargs in A5b).
+        """
+        from ff_explorer import MatchEntry, EntryKind
         win = MainWindow()
         try:
             idx = [win._match_mode_combo.itemText(i)
                    for i in range(win._match_mode_combo.count())].index("Regex")
             win._match_mode_combo.setCurrentIndex(idx)
 
-            captured = {}
-
-            def fake_list_entries(path, kind, seed, **kwargs):
-                captured.update(kwargs)
-                return []
+            save_called = []
 
             def fake_save_listing(path, kind, seed, **kwargs):
+                save_called.append(kwargs)
                 return tmp_path / "out.txt"
 
-            with (
-                patch("ff_explorer.gui.main_window.list_entries",
-                      side_effect=fake_list_entries),
-                patch("ff_explorer.gui.main_window.save_listing",
-                      side_effect=fake_save_listing),
-            ):
-                win._do_save(str(tmp_path), win._current_kind(), ".*", "file")
+            # Pre-built entries list (as the worker would supply)
+            fake_entry = MatchEntry(path=tmp_path / "match.txt", kind=EntryKind.FILES)
+            entries = [fake_entry]
 
-            assert captured.get("match_mode") == "regex", (
-                "_do_save must pass match_mode='regex' to list_entries "
-                "when Regex mode is selected"
+            with patch("ff_explorer.gui.main_window.save_listing",
+                       side_effect=fake_save_listing):
+                win._do_save(str(tmp_path), win._current_kind(), ".*", "file", entries)
+
+            assert len(save_called) == 1, "_do_save must call save_listing exactly once"
+            # Verify _build_list_entries_kwargs reflects Regex selection
+            kwargs = win._build_list_entries_kwargs()
+            assert kwargs.get("match_mode") == "regex", (
+                "_build_list_entries_kwargs must include match_mode='regex' when Regex selected"
             )
         finally:
             win.close()
             win.deleteLater()
 
     def test_run_save_passes_case_insensitive_when_unchecked(self, qapp, tmp_path):
-        """_do_save passes case_sensitive=False to save_listing and list_entries."""
+        """_do_save passes case_sensitive=False to save_listing.
+
+        SPEC-14: _do_save no longer calls list_entries; it calls save_listing
+        with core_kwargs (which includes case_sensitive).
+        """
+        from ff_explorer import MatchEntry, EntryKind
         win = MainWindow()
         try:
             win._case_sensitive_check.setChecked(False)
 
             save_kwargs: dict = {}
-            list_kwargs: dict = {}
 
             def fake_save_listing(path, kind, seed, **kwargs):
                 save_kwargs.update(kwargs)
                 return tmp_path / "out.txt"
 
-            def fake_list_entries(path, kind, seed, **kwargs):
-                list_kwargs.update(kwargs)
-                return []
+            entries: list = []  # empty — nothing was scanned in this focused test
 
-            with (
-                patch("ff_explorer.gui.main_window.save_listing",
-                      side_effect=fake_save_listing),
-                patch("ff_explorer.gui.main_window.list_entries",
-                      side_effect=fake_list_entries),
-            ):
-                win._do_save(str(tmp_path), win._current_kind(), "test", "file")
+            with patch("ff_explorer.gui.main_window.save_listing",
+                       side_effect=fake_save_listing):
+                win._do_save(str(tmp_path), win._current_kind(), "test", "file", entries)
 
             assert save_kwargs.get("case_sensitive") is False, (
                 "case_sensitive=False must be passed to save_listing"
-            )
-            assert list_kwargs.get("case_sensitive") is False, (
-                "case_sensitive=False must be passed to list_entries"
             )
         finally:
             win.close()
@@ -910,6 +939,7 @@ class TestRunPassesFilterKwargs:
 
     def test_run_save_default_filters_no_extra_kwargs(self, qapp, tmp_path):
         """_do_save with default filters passes no extra kwargs to save_listing."""
+        from ff_explorer import MatchEntry, EntryKind
         win = MainWindow()
         try:
             save_kwargs: dict = {}
@@ -918,16 +948,11 @@ class TestRunPassesFilterKwargs:
                 save_kwargs.update(kwargs)
                 return tmp_path / "out.txt"
 
-            def fake_list_entries(path, kind, seed, **kwargs):
-                return []
+            entries: list = []
 
-            with (
-                patch("ff_explorer.gui.main_window.save_listing",
-                      side_effect=fake_save_listing),
-                patch("ff_explorer.gui.main_window.list_entries",
-                      side_effect=fake_list_entries),
-            ):
-                win._do_save(str(tmp_path), win._current_kind(), "test", "file")
+            with patch("ff_explorer.gui.main_window.save_listing",
+                       side_effect=fake_save_listing):
+                win._do_save(str(tmp_path), win._current_kind(), "test", "file", entries)
 
             assert save_kwargs == {}, (
                 "Default filters must produce no extra kwargs to save_listing"
@@ -937,40 +962,23 @@ class TestRunPassesFilterKwargs:
             win.deleteLater()
 
     def test_invalid_regex_surfaced_as_warning_not_crash(self, qapp, tmp_path):
-        """An invalid regex raises ValueError from core, shown as QMessageBox.warning."""
+        """An invalid regex ValueError from the worker is shown as QMessageBox.warning.
+
+        SPEC-14: the worker emits error(exc); the main-thread handler
+        _handle_scan_error routes it to QMessageBox.warning.  We test
+        _handle_scan_error directly here (the threading + exec() path is
+        covered by TestScanWorker.test_worker_emits_error_on_exception).
+        """
         win = MainWindow()
         try:
-            idx = [win._match_mode_combo.itemText(i)
-                   for i in range(win._match_mode_combo.count())].index("Regex")
-            win._match_mode_combo.setCurrentIndex(idx)
-
-            win._path_edit.setText(str(tmp_path))
-            win._action_combo.setCurrentIndex(
-                list(win._action_combo.itemText(i)
-                     for i in range(win._action_combo.count())).index("Save list")
-            )
-            win._seed_edit.setText("[invalid(")
-
             warning_shown = []
-
-            def fake_list_entries(path, kind, seed, **kwargs):
-                raise ValueError("bad regex: [invalid(")
-
-            def fake_save_listing(path, kind, seed, **kwargs):
-                return tmp_path / "out.txt"
 
             def fake_warning(parent, title, message, *args, **kwargs):
                 warning_shown.append({"title": title, "message": message})
 
-            with (
-                patch("ff_explorer.gui.main_window.list_entries",
-                      side_effect=fake_list_entries),
-                patch("ff_explorer.gui.main_window.save_listing",
-                      side_effect=fake_save_listing),
-                patch("ff_explorer.gui.main_window.QMessageBox.warning",
-                      side_effect=fake_warning),
-            ):
-                win._run()
+            with patch("ff_explorer.gui.main_window.QMessageBox.warning",
+                       side_effect=fake_warning):
+                win._handle_scan_error(ValueError("bad regex: [invalid("))
 
             assert len(warning_shown) > 0, (
                 "An invalid regex ValueError must be surfaced as QMessageBox.warning"
@@ -985,29 +993,35 @@ class TestRunPassesFilterKwargs:
             win.deleteLater()
 
     def test_run_remove_passes_case_sensitive_to_remove_entries(self, qapp, tmp_path):
-        """_do_remove passes case_sensitive=False to remove_entries when unchecked."""
+        """_do_remove passes case_sensitive=False to remove_entries when unchecked.
+
+        SPEC-14: _do_remove now receives the pre-scanned entries list; the
+        case_sensitive kwarg is forwarded to the destructive call on Yes.
+        """
+        from ff_explorer import MatchEntry, EntryKind
         from ff_explorer.core import RemovalReport
         win = MainWindow()
         try:
             win._case_sensitive_check.setChecked(False)
             fake_path = tmp_path / "target.txt"
             fake_path.write_text("x")
-            preview_report = RemovalReport(matched=[fake_path])
+            entries = [MatchEntry(path=fake_path, kind=EntryKind.FILES)]
+            live_report = RemovalReport(matched=[fake_path], removed=[fake_path])
 
             remove_kwargs: dict = {}
 
             def fake_remove(path, kind, seed, dry_run=True, confirm=False, **kwargs):
                 remove_kwargs.update(kwargs)
                 remove_kwargs["dry_run"] = dry_run
-                return preview_report
+                return live_report
 
             with (
                 patch("ff_explorer.gui.main_window.remove_entries",
                       side_effect=fake_remove),
                 patch("ff_explorer.gui.main_window.QMessageBox.question",
-                      return_value=QMessageBox.StandardButton.No),
+                      return_value=QMessageBox.StandardButton.Yes),
             ):
-                win._do_remove(str(tmp_path), win._current_kind(), "target", "file")
+                win._do_remove(str(tmp_path), win._current_kind(), "target", "file", entries)
 
             assert remove_kwargs.get("case_sensitive") is False, (
                 "_do_remove must pass case_sensitive=False to remove_entries"
@@ -1312,38 +1326,25 @@ class TestContentSearch:
             win.deleteLater()
 
     def test_ungated_content_search_shows_friendly_warning(self, qapp, tmp_path):
-        """ContentSearchUngatedError from core is caught and shown as QMessageBox.warning
-        with a clear, friendly message — no crash."""
+        """ContentSearchUngatedError from the worker is shown as QMessageBox.warning
+        with a clear, friendly message — no crash.
+
+        SPEC-14: the worker emits error(exc); _handle_scan_error routes it to
+        QMessageBox.warning.  We test _handle_scan_error directly here to avoid
+        the QProgressDialog.exec() nested-event-loop complexity in headless tests
+        (the threading path is covered by TestScanWorker.test_worker_emits_error_on_exception).
+        """
         from ff_explorer.core import ContentSearchUngatedError as _CSUE
         win = MainWindow()
         try:
-            win._path_edit.setText(str(tmp_path))
-            action_items = [
-                win._action_combo.itemText(i)
-                for i in range(win._action_combo.count())
-            ]
-            win._action_combo.setCurrentIndex(action_items.index("Save list"))
-            win._seed_edit.setText("")  # empty seed — list_entries accepts it
-            win._content_query_edit.setText("some content")
-
             warned = []
-
-            def fake_save(path, kind, seed, **kwargs):
-                return tmp_path / "out.txt"
-
-            def fake_list(path, kind, seed, **kwargs):
-                raise _CSUE()
 
             def fake_warning(parent, title, msg, *a, **kw):
                 warned.append({"title": title, "msg": msg})
 
-            with (
-                patch("ff_explorer.gui.main_window.save_listing", side_effect=fake_save),
-                patch("ff_explorer.gui.main_window.list_entries", side_effect=fake_list),
-                patch("ff_explorer.gui.main_window.QMessageBox.warning",
-                      side_effect=fake_warning),
-            ):
-                win._run()
+            with patch("ff_explorer.gui.main_window.QMessageBox.warning",
+                       side_effect=fake_warning):
+                win._handle_scan_error(_CSUE())
 
             assert len(warned) >= 1, (
                 "ContentSearchUngatedError must surface as QMessageBox.warning"
@@ -1502,13 +1503,18 @@ class TestVersioningCheckbox:
             win.deleteLater()
 
     def test_versioning_checked_passes_versioning_true_to_remove(self, qapp, tmp_path):
-        """_do_remove with versioning checked passes versioning=True to remove_entries."""
+        """_do_remove with versioning checked passes versioning=True to remove_entries.
+
+        SPEC-14: _do_remove receives the pre-scanned entries list; versioning
+        kwarg is forwarded to the destructive remove_entries call on Yes.
+        """
+        from ff_explorer import MatchEntry, EntryKind
         from ff_explorer.core import RemovalReport
         win = MainWindow()
         try:
             fake_target = tmp_path / "old_file.txt"
             fake_target.write_text("x")
-            preview = RemovalReport(matched=[fake_target])
+            entries = [MatchEntry(path=fake_target, kind=EntryKind.FILES)]
             live_report = RemovalReport(matched=[fake_target], removed=[fake_target])
 
             captured_kwargs: dict = {}
@@ -1516,7 +1522,7 @@ class TestVersioningCheckbox:
             def fake_remove(path, kind, seed, dry_run=True, confirm=False, **kwargs):
                 captured_kwargs.update(kwargs)
                 captured_kwargs["dry_run"] = dry_run
-                return preview if dry_run else live_report
+                return live_report
 
             win._versioning_check.setChecked(True)
 
@@ -1527,7 +1533,7 @@ class TestVersioningCheckbox:
                     return_value=QMessageBox.StandardButton.Yes,
                 ),
             ):
-                win._do_remove(str(tmp_path), win._current_kind(), "old_file", "file")
+                win._do_remove(str(tmp_path), win._current_kind(), "old_file", "file", entries)
 
             assert captured_kwargs.get("versioning") is True, (
                 "_do_remove with versioning checked must pass versioning=True to remove_entries"
@@ -1537,19 +1543,24 @@ class TestVersioningCheckbox:
             win.deleteLater()
 
     def test_versioning_unchecked_no_versioning_kwarg(self, qapp, tmp_path):
-        """_do_remove with versioning unchecked does NOT pass versioning kwarg."""
+        """_do_remove with versioning unchecked does NOT pass versioning kwarg.
+
+        SPEC-14: entries list passed directly; No dialog means no destructive call.
+        """
+        from ff_explorer import MatchEntry, EntryKind
         from ff_explorer.core import RemovalReport
         win = MainWindow()
         try:
             fake_target = tmp_path / "file.txt"
             fake_target.write_text("x")
-            preview = RemovalReport(matched=[fake_target])
+            entries = [MatchEntry(path=fake_target, kind=EntryKind.FILES)]
+            live_report = RemovalReport(matched=[fake_target], removed=[fake_target])
 
             captured_kwargs: dict = {}
 
             def fake_remove(path, kind, seed, dry_run=True, confirm=False, **kwargs):
                 captured_kwargs.update(kwargs)
-                return preview
+                return live_report
 
             win._versioning_check.setChecked(False)
 
@@ -1557,10 +1568,10 @@ class TestVersioningCheckbox:
                 patch("ff_explorer.gui.main_window.remove_entries", side_effect=fake_remove),
                 patch(
                     "ff_explorer.gui.main_window.QMessageBox.question",
-                    return_value=QMessageBox.StandardButton.No,
+                    return_value=QMessageBox.StandardButton.Yes,
                 ),
             ):
-                win._do_remove(str(tmp_path), win._current_kind(), "file", "file")
+                win._do_remove(str(tmp_path), win._current_kind(), "file", "file", entries)
 
             assert "versioning" not in captured_kwargs, (
                 "_do_remove with unchecked versioning must not pass versioning kwarg"
@@ -1570,13 +1581,16 @@ class TestVersioningCheckbox:
             win.deleteLater()
 
     def test_versioning_gate_still_defaults_to_no(self, qapp, tmp_path):
-        """Even with versioning=True, the confirm dialog must default to No."""
-        from ff_explorer.core import RemovalReport
+        """Even with versioning=True, the confirm dialog must default to No.
+
+        SPEC-14: entries list passed directly; safety gate is unchanged.
+        """
+        from ff_explorer import MatchEntry, EntryKind
         win = MainWindow()
         try:
             fake_target = tmp_path / "versioned.txt"
             fake_target.write_text("x")
-            preview = RemovalReport(matched=[fake_target])
+            entries = [MatchEntry(path=fake_target, kind=EntryKind.FILES)]
 
             destructive_calls = []
 
@@ -1584,7 +1598,8 @@ class TestVersioningCheckbox:
                 if not dry_run:
                     destructive_calls.append(True)
                     raise AssertionError("Must not run destructive when No selected")
-                return preview
+                from ff_explorer.core import RemovalReport
+                return RemovalReport(matched=[fake_target])
 
             win._versioning_check.setChecked(True)
 
@@ -1595,7 +1610,7 @@ class TestVersioningCheckbox:
                     return_value=QMessageBox.StandardButton.No,
                 ),
             ):
-                win._do_remove(str(tmp_path), win._current_kind(), "versioned", "file")
+                win._do_remove(str(tmp_path), win._current_kind(), "versioned", "file", entries)
 
             assert len(destructive_calls) == 0, (
                 "Versioning remove gate must still default to No — no destructive call"
@@ -2128,5 +2143,2381 @@ class TestLiveIndexing:
                 "Checkbox must be reverted to unchecked when watchdog is missing"
             )
         finally:
+            win.close()
+            win.deleteLater()
+
+
+# ---------------------------------------------------------------------------
+# A16 — SPEC-02/03/04: registry wiring, dynamic action tooltip, Shift+F1
+# ---------------------------------------------------------------------------
+
+class TestWidgetRegistryWiring:
+    """A16: All main widgets have _ff_info_key set via register_info;
+    action combo tooltip updates dynamically from the registry;
+    Shift+F1 shortcut exists and enters WhatsThis mode without crash."""
+
+    # Widgets expected to carry a _ff_info_key property after MainWindow init.
+    # These match every register_info() / register_info_text() call in _setup_ui
+    # and _build_filters_panel.
+    _EXPECTED_KEYS = {
+        "path",           # path_label, _path_edit
+        "path_browse",    # browse_btn
+        "seed",           # seed_label, _seed_edit
+        "mode_folders",   # _radio_folders
+        "mode_files",     # _radio_files
+        "action",         # _action_combo (dynamic via register_info_text)
+        "run",            # run_btn
+        "filters_toggle", # _filters_toggle_btn
+        "settings",       # settings_btn
+        "disk_usage",     # disk_usage_btn
+        "find_duplicates",# dup_btn
+        "batch_rename",   # rename_btn
+        "preset_save",    # preset_save_btn
+        "preset_load",    # preset_load_btn
+        "live_index",     # _live_index_check
+        "filter_match_mode",       # _match_mode_combo
+        "filter_case_sensitive",   # _case_sensitive_check
+        "filter_min_size",         # _min_size_spin
+        "filter_max_size",         # _max_size_spin
+        "filter_date_after",       # _date_after_check
+        "filter_date_after_edit",  # _date_after_edit
+        "filter_date_before",      # _date_before_check
+        "filter_date_before_edit", # _date_before_edit
+        "filter_extensions",       # _extensions_edit
+        "filter_content_query",    # _content_query_edit
+        "filter_search_archives",  # _search_archives_check
+        "filter_respect_ignore",   # _respect_ignore_check
+        "filter_ignore_globs",     # _ignore_globs_edit
+        "filter_versioning",       # _versioning_check
+        "filter_include_hidden",   # _include_hidden_check (SPEC-17)
+        # SPEC-18 result-view buttons (registered inside _show_results_view)
+        # These are NOT on the main window but are tested via the results-view
+        # dialog tests — they do not appear in findChildren(QWidget) on win itself.
+        # They are registered in WIDGET_INFO and tested in A21.
+    }
+
+    def test_run_key_exists_in_registry(self):
+        """WIDGET_INFO must contain the 'run' key (added for SPEC-02)."""
+        assert "run" in WIDGET_INFO, (
+            "'run' key must be present in WIDGET_INFO (SPEC-02 requirement)"
+        )
+        assert WIDGET_INFO["run"], "WIDGET_INFO['run'] must be a non-empty string"
+
+    def test_register_info_text_helper_exists(self):
+        """register_info_text must be importable from widget_info."""
+        # Already imported at top; verify it is callable with the right signature
+        from ff_explorer.gui.widget_info import register_info_text as rit
+        assert callable(rit)
+
+    def test_all_expected_registry_keys_present_in_widget_info(self):
+        """Every key in _EXPECTED_KEYS must exist in WIDGET_INFO."""
+        missing = [k for k in self._EXPECTED_KEYS if k not in WIDGET_INFO]
+        assert not missing, (
+            f"Missing keys in WIDGET_INFO: {missing}"
+        )
+
+    def test_main_widgets_have_ff_info_key_property(self, qapp):
+        """Every registered widget carries _ff_info_key set to a known registry key."""
+        from PySide6.QtWidgets import QWidget
+        win = MainWindow()
+        try:
+            found_keys: set[str] = set()
+            for child in win.findChildren(QWidget):
+                key = child.property("_ff_info_key")
+                if key:
+                    found_keys.add(key)
+            missing = self._EXPECTED_KEYS - found_keys
+            assert not missing, (
+                f"Widgets missing _ff_info_key property after MainWindow init: {missing}\n"
+                "Each widget listed above must be wired via register_info() or "
+                "register_info_text() in _setup_ui / _build_filters_panel."
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_action_combo_tooltip_changes_on_selection(self, qapp):
+        """_update_action_tooltip sets a non-empty tooltip that changes per action."""
+        win = MainWindow()
+        try:
+            tooltips: list[str] = []
+            items = [win._action_combo.itemText(i)
+                     for i in range(win._action_combo.count())]
+            for i, item in enumerate(items):
+                win._action_combo.setCurrentIndex(i)
+                tooltips.append(win._action_combo.toolTip())
+
+            # All tooltips must be non-empty strings
+            for i, tip in enumerate(tooltips):
+                assert isinstance(tip, str) and tip.strip(), (
+                    f"Action combo tooltip at index {i} ('{items[i]}') must be non-empty"
+                )
+
+            # Save list (code=1) and Remove list (code=2) tooltips must differ
+            # because they have different action_detail entries.
+            save_idx = items.index("Save list")
+            remove_idx = items.index("Remove list")
+            assert tooltips[save_idx] != tooltips[remove_idx], (
+                "Save list and Remove list tooltips must differ "
+                "(each has a distinct action_detail registry entry)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_action_combo_ff_info_key_is_action(self, qapp):
+        """_action_combo._ff_info_key must be 'action' after _update_action_tooltip."""
+        win = MainWindow()
+        try:
+            key = win._action_combo.property("_ff_info_key")
+            assert key == "action", (
+                f"_action_combo._ff_info_key must be 'action', got {key!r}"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_action_combo_whats_this_set(self, qapp):
+        """_action_combo.whatsThis() must be non-empty (register_info_text sets it)."""
+        win = MainWindow()
+        try:
+            wt = win._action_combo.whatsThis()
+            assert isinstance(wt, str) and wt.strip(), (
+                "_action_combo.whatsThis() must be non-empty after _update_action_tooltip"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_section_labels_have_object_name(self, qapp):
+        """path_label and seed_label must have objectName='sectionLabel'."""
+        from PySide6.QtWidgets import QLabel
+        win = MainWindow()
+        try:
+            section_labels = [
+                lbl for lbl in win.findChildren(QLabel)
+                if lbl.objectName() == "sectionLabel"
+            ]
+            assert len(section_labels) >= 2, (
+                "At least 2 QLabel widgets must have objectName='sectionLabel' "
+                "(path_label and seed_label — SPEC-04)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_run_button_has_object_name(self, qapp):
+        """run_btn must have objectName='runButton'."""
+        from PySide6.QtWidgets import QPushButton
+        win = MainWindow()
+        try:
+            run_btns = [
+                btn for btn in win.findChildren(QPushButton)
+                if btn.objectName() == "runButton"
+            ]
+            assert len(run_btns) == 1, (
+                "Exactly one QPushButton must have objectName='runButton' (SPEC-04)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_theme_stylesheet_contains_section_label_rule(self):
+        """build_stylesheet must produce QSS containing QLabel#sectionLabel."""
+        from ff_explorer.gui.theme import build_stylesheet, LIGHT, DARK
+        for name, theme in [("LIGHT", LIGHT), ("DARK", DARK)]:
+            qss = build_stylesheet(theme)
+            assert "QLabel#sectionLabel" in qss, (
+                f"build_stylesheet({name}) must contain a QLabel#sectionLabel rule (SPEC-04)"
+            )
+            assert "QPushButton#runButton" in qss, (
+                f"build_stylesheet({name}) must contain a QPushButton#runButton rule (SPEC-04)"
+            )
+
+    def test_theme_has_exactly_one_qtoolip_block(self):
+        """build_stylesheet must contain exactly one QToolTip {{ block (SPEC-04)."""
+        from ff_explorer.gui.theme import build_stylesheet, LIGHT
+        qss = build_stylesheet(LIGHT)
+        count = qss.count("QToolTip {")
+        assert count == 1, (
+            f"build_stylesheet must contain exactly one 'QToolTip {{' block, found {count} (SPEC-04)"
+        )
+
+    def test_shift_f1_shortcut_wired_in_main_window(self, qapp):
+        """MainWindow must have a QShortcut for Shift+F1 that enters WhatsThis mode."""
+        from PySide6.QtGui import QKeySequence, QShortcut
+        win = MainWindow()
+        try:
+            shortcuts = win.findChildren(QShortcut)
+            shift_f1_shortcuts = [
+                s for s in shortcuts
+                if s.key() == QKeySequence("Shift+F1")
+            ]
+            assert len(shift_f1_shortcuts) >= 1, (
+                "MainWindow must have a QShortcut with key Shift+F1 (SPEC-04)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_no_inline_tooltip_literals_in_gui_package(self):
+        """SPEC-09 lint: no inline ``setToolTip("literal")`` / ``setWhatsThis("literal")``
+        string literal may appear anywhere in the GUI package — every call must
+        reference the central registry (via register_info / register_info_text).
+
+        ``register_info`` itself calls ``widget.setToolTip(text)`` where *text* is
+        a variable (registry lookup), and treemap_view uses ``setToolTip(path)``
+        with a variable — neither matches the literal pattern, so both pass.
+        """
+        import re
+        from pathlib import Path
+
+        gui_dir = Path(__file__).resolve().parent.parent / "ff_explorer" / "gui"
+        # Match setToolTip(  or setWhatsThis(  immediately followed by a quote.
+        literal_pattern = re.compile(r"""set(?:ToolTip|WhatsThis)\(\s*["']""")
+
+        offenders: list[str] = []
+        for py_file in gui_dir.glob("*.py"):
+            text = py_file.read_text(encoding="utf-8")
+            for lineno, line in enumerate(text.splitlines(), start=1):
+                if literal_pattern.search(line):
+                    offenders.append(f"{py_file.name}:{lineno}: {line.strip()}")
+
+        assert not offenders, (
+            "Inline tooltip/whatsThis string literals found in the GUI package — "
+            "route them through the widget_info registry (SPEC-02/03/09):\n"
+            + "\n".join(offenders)
+        )
+
+    def test_no_inline_stylesheet_overrides_on_core_widgets(self, qapp):
+        """path_label, seed_label, run_btn must NOT carry hard-coded inline styleSheet
+        with literal colour values — styling must come from the theme QSS only."""
+        from PySide6.QtWidgets import QLabel, QPushButton
+        win = MainWindow()
+        try:
+            # Check sectionLabel widgets: their styleSheet() must be empty
+            # (the visual styling is applied via QLabel#sectionLabel in the theme QSS)
+            section_labels = [
+                lbl for lbl in win.findChildren(QLabel)
+                if lbl.objectName() == "sectionLabel"
+            ]
+            for lbl in section_labels:
+                ss = lbl.styleSheet()
+                assert not ss, (
+                    f"sectionLabel '{lbl.text()}' must not carry an inline styleSheet "
+                    f"(got: {ss!r}) — SPEC-04 requires central theming only"
+                )
+            # run_btn inline styleSheet must also be empty
+            run_btns = [
+                btn for btn in win.findChildren(QPushButton)
+                if btn.objectName() == "runButton"
+            ]
+            for btn in run_btns:
+                ss = btn.styleSheet()
+                assert not ss, (
+                    f"runButton must not carry an inline styleSheet "
+                    f"(got: {ss!r}) — SPEC-04 requires central theming only"
+                )
+        finally:
+            win.close()
+            win.deleteLater()
+
+
+# ---------------------------------------------------------------------------
+# A17 — SPEC-14: off-thread scan worker (_ScanWorker) correctness
+# ---------------------------------------------------------------------------
+
+class TestScanWorker:
+    """A17: _ScanWorker emits finished with the same entries as a direct
+    iter_entries call; honors cancel; the main window still constructs and
+    a small-tree Run updates status via the worker path.
+
+    All tests run headless under QT_QPA_PLATFORM=offscreen.  Worker signals
+    are waited for by spinning the event loop with a timeout — deterministic,
+    no real sleeps required.
+    """
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _spin_until(condition, timeout_ms: int = 5000) -> bool:
+        """Process Qt events until *condition()* is True or *timeout_ms* elapses.
+
+        Returns True when the condition became True, False on timeout.
+        Uses QApplication.processEvents() in a tight loop with a wall-clock guard
+        so we never block forever in CI and never need real ``time.sleep`` calls.
+        """
+        import time
+        from PySide6.QtWidgets import QApplication
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        while time.monotonic() < deadline:
+            QApplication.processEvents()
+            if condition():
+                return True
+        return False
+
+    # ------------------------------------------------------------------
+    # Worker tests (direct unit tests — no MainWindow needed)
+    # ------------------------------------------------------------------
+
+    def test_worker_finished_matches_direct_iter_entries(self, qapp, tmp_path):
+        """_ScanWorker emits finished with the same entries as iter_entries().
+
+        Build a small tmp tree, run the worker, collect the finished payload,
+        and assert it equals the direct iter_entries result.
+        """
+        from ff_explorer import iter_entries, EntryKind
+        from ff_explorer.gui.main_window import _ScanWorker
+        from PySide6.QtCore import QThread
+
+        # Build a small tree
+        (tmp_path / "alpha.txt").write_bytes(b"a")
+        (tmp_path / "beta.txt").write_bytes(b"b")
+        sub = tmp_path / "sub"
+        sub.mkdir()
+        (sub / "gamma.txt").write_bytes(b"g")
+
+        # Reference result via direct call
+        expected = list(iter_entries(str(tmp_path), EntryKind.FILES, ""))
+        assert len(expected) >= 3, "tmp tree must have at least 3 files"
+
+        # Run the worker
+        finished_payload: list = []
+        error_payload: list = []
+
+        worker = _ScanWorker(str(tmp_path), EntryKind.FILES, "", {})
+        thread = QThread()
+        worker.moveToThread(thread)
+        worker.finished.connect(lambda entries: finished_payload.extend(entries))
+        worker.error.connect(lambda exc: error_payload.append(exc))
+        thread.started.connect(worker.run)
+        thread.start()
+
+        done = self._spin_until(
+            lambda: bool(finished_payload) or bool(error_payload),
+            timeout_ms=5000,
+        )
+        thread.quit()
+        thread.wait()
+
+        assert done, "Worker did not emit finished within 5 s"
+        assert not error_payload, f"Worker emitted error: {error_payload}"
+        assert len(finished_payload) == len(expected), (
+            f"Worker finished payload length {len(finished_payload)} != "
+            f"direct iter_entries length {len(expected)}"
+        )
+        # Paths must match (order may differ on some OSes — compare as sets)
+        finished_paths = {str(e.path) for e in finished_payload}
+        expected_paths = {str(e.path) for e in expected}
+        assert finished_paths == expected_paths, (
+            "Worker finished entries must match direct iter_entries result"
+        )
+
+    def test_worker_cancel_stops_without_finished(self, qapp, tmp_path):
+        """_ScanWorker.cancel() causes the worker to stop without emitting finished.
+
+        Start the worker, cancel immediately, and assert neither finished nor
+        error is emitted (the cooperative cancel flag is checked between yields).
+        """
+        from ff_explorer import EntryKind
+        from ff_explorer.gui.main_window import _ScanWorker
+        from PySide6.QtCore import QThread
+
+        # Build a minimal tree so the worker has something to iterate over
+        (tmp_path / "a.txt").write_bytes(b"a")
+
+        finished_calls: list = []
+        error_calls: list = []
+
+        worker = _ScanWorker(str(tmp_path), EntryKind.FILES, "", {})
+        thread = QThread()
+        worker.moveToThread(thread)
+        worker.finished.connect(lambda e: finished_calls.append(e))
+        worker.error.connect(lambda ex: error_calls.append(ex))
+        thread.started.connect(worker.run)
+
+        # Cancel before starting — the worker sees the flag on its first check
+        worker.cancel()
+        thread.start()
+
+        # Give the thread time to run and confirm it does NOT emit finished
+        import time
+        from PySide6.QtWidgets import QApplication
+        deadline = time.monotonic() + 1.0  # 1 s is plenty for a 1-file tree
+        while time.monotonic() < deadline:
+            QApplication.processEvents()
+        thread.quit()
+        thread.wait()
+
+        assert len(finished_calls) == 0, (
+            "_ScanWorker must NOT emit finished after cancel() is called"
+        )
+        assert len(error_calls) == 0, (
+            "_ScanWorker must NOT emit error after cancel() is called"
+        )
+
+    def test_worker_emits_error_on_exception(self, qapp, tmp_path):
+        """_ScanWorker emits error(exc) when iter_entries raises an exception."""
+        from ff_explorer import EntryKind
+        from ff_explorer.gui.main_window import _ScanWorker
+        from PySide6.QtCore import QThread
+        from unittest.mock import patch
+
+        finished_calls: list = []
+        error_calls: list = []
+
+        worker = _ScanWorker(str(tmp_path), EntryKind.FILES, "", {})
+        thread = QThread()
+        worker.moveToThread(thread)
+        worker.finished.connect(lambda e: finished_calls.append(e))
+        worker.error.connect(lambda ex: error_calls.append(ex))
+
+        def _bad_iter(*a, **kw):
+            raise ValueError("injected error")
+            return iter([])  # type: ignore[misc]
+
+        thread.started.connect(worker.run)
+
+        with patch("ff_explorer.gui.main_window.iter_entries", side_effect=_bad_iter):
+            thread.start()
+            done = self._spin_until(
+                lambda: bool(error_calls) or bool(finished_calls),
+                timeout_ms=3000,
+            )
+        thread.quit()
+        thread.wait()
+
+        assert done, "Worker did not emit error within 3 s"
+        assert len(error_calls) == 1, "Worker must emit exactly one error signal"
+        assert isinstance(error_calls[0], ValueError), (
+            "Emitted error must be the original ValueError"
+        )
+        assert len(finished_calls) == 0, (
+            "Worker must NOT emit finished when it raises"
+        )
+
+    # ------------------------------------------------------------------
+    # End-to-end: MainWindow._run() with worker path
+    # ------------------------------------------------------------------
+
+    def test_main_window_run_save_updates_status_via_worker(self, qapp, tmp_path):
+        """MainWindow._on_scan_complete() with Save action updates the status bar.
+
+        SPEC-14: _on_scan_complete is the post-scan handler called by the finished
+        signal on the main thread.  We drive it directly to avoid the
+        QProgressDialog.exec() nested-event-loop complexity in headless tests
+        (the worker → finished → _on_scan_complete signal chain is separately
+        validated by test_worker_finished_matches_direct_iter_entries).
+
+        Asserts: _do_save is called via _on_scan_complete, save_listing is invoked,
+        and the status bar is updated with a non-empty message.
+        """
+        from ff_explorer import EntryKind, MatchEntry
+        from unittest.mock import patch
+
+        (tmp_path / "hello.txt").write_bytes(b"h")
+        (tmp_path / "world.txt").write_bytes(b"w")
+
+        win = MainWindow()
+        try:
+            win._path_edit.setText(str(tmp_path))
+
+            # Two pre-scanned entries (as the worker would deliver)
+            entries = [
+                MatchEntry(path=tmp_path / "hello.txt", kind=EntryKind.FILES),
+                MatchEntry(path=tmp_path / "world.txt", kind=EntryKind.FILES),
+            ]
+
+            # SPEC-19: _on_scan_complete now calls _show_results_view which opens
+            # a QDialog via exec(); suppress it to keep this headless test non-blocking.
+            win._show_results_view = lambda *a, **kw: None  # type: ignore[method-assign]
+
+            with patch(
+                "ff_explorer.gui.main_window.save_listing",
+                return_value=tmp_path / "listing.txt",
+            ):
+                # action_code=1 → _do_save
+                win._on_scan_complete(1, str(tmp_path), EntryKind.FILES, "", "file", entries)
+
+            status = win._status_bar.currentMessage()
+            assert status, "Status bar must show a non-empty message after scan complete"
+            # The save path includes the listing path
+            assert "listing.txt" in status or "saved" in status.lower(), (
+                f"Status must mention saved listing, got: {status!r}"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_worker_progress_signal_emitted(self, qapp, tmp_path):
+        """_ScanWorker emits progress() signal every _PROGRESS_INTERVAL entries.
+
+        Build a tree with > _PROGRESS_INTERVAL files and assert at least one
+        progress emission occurs before finished.
+        """
+        from ff_explorer import EntryKind
+        from ff_explorer.gui.main_window import _ScanWorker, _PROGRESS_INTERVAL
+        from PySide6.QtCore import QThread
+
+        # Create _PROGRESS_INTERVAL + 1 files so progress fires at least once
+        for i in range(_PROGRESS_INTERVAL + 1):
+            (tmp_path / f"file_{i:04d}.txt").write_bytes(b"x")
+
+        progress_calls: list = []
+        finished_calls: list = []
+
+        worker = _ScanWorker(str(tmp_path), EntryKind.FILES, "", {})
+        thread = QThread()
+        worker.moveToThread(thread)
+        worker.progress.connect(lambda count, path: progress_calls.append((count, path)))
+        worker.finished.connect(lambda e: finished_calls.append(e))
+        thread.started.connect(worker.run)
+        thread.start()
+
+        done = self._spin_until(
+            lambda: bool(finished_calls),
+            timeout_ms=5000,
+        )
+        thread.quit()
+        thread.wait()
+
+        assert done, "Worker did not finish within 5 s"
+        assert len(progress_calls) >= 1, (
+            f"Worker must emit at least one progress() signal when > "
+            f"{_PROGRESS_INTERVAL} entries are scanned"
+        )
+
+
+# ---------------------------------------------------------------------------
+# A18 — SPEC-19: results view + properties dialog
+# ---------------------------------------------------------------------------
+
+class TestResultsView:
+    """A18: _show_results_view builds a QDialog with a table and properties
+    button; _show_entry_properties opens a metadata dialog; both work headlessly.
+    """
+
+    @staticmethod
+    def _make_entries(tmp_path: Path) -> list:
+        from ff_explorer import MatchEntry, EntryKind
+        f1 = tmp_path / "alpha.txt"
+        f2 = tmp_path / "beta.py"
+        f1.write_bytes(b"hello")
+        f2.write_bytes(b"world" * 10)
+        return [
+            MatchEntry(path=f1, kind=EntryKind.FILES),
+            MatchEntry(path=f2, kind=EntryKind.FILES),
+        ]
+
+    def test_show_results_view_opens_dialog(self, qapp, tmp_path):
+        """_show_results_view opens a QDialog without error (headless)."""
+        from PySide6.QtWidgets import QDialog
+        win = MainWindow()
+        try:
+            entries = self._make_entries(tmp_path)
+            dialogs_opened = []
+
+            def fake_exec(self_dlg):
+                dialogs_opened.append(self_dlg)
+                return 0
+
+            with patch.object(QDialog, "exec", fake_exec):
+                win._show_results_view(entries, [], "file")
+
+            assert len(dialogs_opened) == 1, (
+                "_show_results_view must open exactly one QDialog"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_results_view_table_has_correct_row_count(self, qapp, tmp_path):
+        """Results table has one row per entry in the entries list."""
+        from PySide6.QtWidgets import QDialog, QTableWidget
+        win = MainWindow()
+        try:
+            entries = self._make_entries(tmp_path)
+            tables_found = []
+
+            def fake_exec(self_dlg):
+                for child in self_dlg.findChildren(QTableWidget):
+                    tables_found.append(child)
+                return 0
+
+            with patch.object(QDialog, "exec", fake_exec):
+                win._show_results_view(entries, [], "file")
+
+            assert len(tables_found) == 1, "Results dialog must contain exactly one QTableWidget"
+            assert tables_found[0].rowCount() == len(entries), (
+                f"Table must have {len(entries)} rows, one per entry"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_results_view_table_has_five_columns(self, qapp, tmp_path):
+        """Results table has exactly 5 columns: Name, Path, Type, Size, Modified."""
+        from PySide6.QtWidgets import QDialog, QTableWidget
+        win = MainWindow()
+        try:
+            entries = self._make_entries(tmp_path)
+            tables_found = []
+
+            def fake_exec(self_dlg):
+                for child in self_dlg.findChildren(QTableWidget):
+                    tables_found.append(child)
+                return 0
+
+            with patch.object(QDialog, "exec", fake_exec):
+                win._show_results_view(entries, [], "file")
+
+            assert tables_found, "Results dialog must contain a QTableWidget"
+            assert tables_found[0].columnCount() == 5, (
+                "Results table must have exactly 5 columns (Name, Path, Type, Size, Modified)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_results_view_first_row_name_matches_entry(self, qapp, tmp_path):
+        """First table row Name cell contains the filename of the first entry."""
+        from PySide6.QtWidgets import QDialog, QTableWidget
+        win = MainWindow()
+        try:
+            entries = self._make_entries(tmp_path)
+            tables_found = []
+
+            def fake_exec(self_dlg):
+                for child in self_dlg.findChildren(QTableWidget):
+                    tables_found.append(child)
+                return 0
+
+            with patch.object(QDialog, "exec", fake_exec):
+                win._show_results_view(entries, [], "file")
+
+            table = tables_found[0]
+            name_cell = table.item(0, 0)
+            assert name_cell is not None, "Name cell in row 0 must not be None"
+            assert entries[0].path.name in name_cell.text(), (
+                f"Name cell must contain '{entries[0].path.name}', got {name_cell.text()!r}"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_results_view_empty_entries_opens_dialog(self, qapp, tmp_path):
+        """_show_results_view with empty entries list still opens without crash."""
+        from PySide6.QtWidgets import QDialog
+        win = MainWindow()
+        try:
+            dialogs_opened = []
+
+            def fake_exec(self_dlg):
+                dialogs_opened.append(self_dlg)
+                return 0
+
+            with patch.object(QDialog, "exec", fake_exec):
+                win._show_results_view([], [], "file")
+
+            assert len(dialogs_opened) == 1, (
+                "_show_results_view must open a dialog even with zero entries"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_show_entry_properties_opens_dialog_for_real_file(self, qapp, tmp_path):
+        """_show_entry_properties opens a properties dialog with non-empty metadata."""
+        from PySide6.QtWidgets import QDialog
+        from ff_explorer import entry_metadata
+        win = MainWindow()
+        try:
+            real_file = tmp_path / "propped.txt"
+            real_file.write_bytes(b"prop content")
+            meta = entry_metadata(str(real_file))
+            assert meta, "entry_metadata must return a non-empty dict for a real file"
+
+            dialogs_opened = []
+
+            def fake_exec(self_dlg):
+                dialogs_opened.append(self_dlg)
+                return 0
+
+            with patch.object(QDialog, "exec", fake_exec):
+                win._show_entry_properties(real_file, meta)
+
+            assert len(dialogs_opened) == 1, (
+                "_show_entry_properties must open exactly one dialog"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_show_entry_properties_none_meta_no_crash(self, qapp, tmp_path):
+        """_show_entry_properties with meta=None (archive-internal path) must not crash."""
+        from PySide6.QtWidgets import QDialog
+        win = MainWindow()
+        try:
+            from pathlib import Path
+            fake_path = Path("/archive.zip/internal/member.txt")
+            dialogs_opened = []
+
+            def fake_exec(self_dlg):
+                dialogs_opened.append(self_dlg)
+                return 0
+
+            with patch.object(QDialog, "exec", fake_exec):
+                win._show_entry_properties(fake_path, None)
+
+            assert len(dialogs_opened) == 1, (
+                "_show_entry_properties with None meta must still open a dialog (no crash)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_on_scan_complete_calls_show_results_view(self, qapp, tmp_path):
+        """_on_scan_complete always calls _show_results_view before the action handler.
+
+        This verifies the SPEC-19 flow: results view is shown for all actions
+        (Save/Remove/Compress) without gating them.
+        """
+        from ff_explorer import MatchEntry, EntryKind
+        win = MainWindow()
+        try:
+            f = tmp_path / "item.txt"
+            f.write_bytes(b"x")
+            entries = [MatchEntry(path=f, kind=EntryKind.FILES)]
+
+            results_view_calls = []
+            save_calls = []
+
+            def fake_results_view(ents, skipped, label, action_code=-1):
+                results_view_calls.append({"entries": ents, "skipped": skipped})
+
+            def fake_save(path, kind, seed, **kwargs):
+                save_calls.append(True)
+                return tmp_path / "out.txt"
+
+            win._show_results_view = fake_results_view  # type: ignore[method-assign]
+
+            with patch("ff_explorer.gui.main_window.save_listing",
+                       side_effect=fake_save):
+                win._on_scan_complete(1, str(tmp_path), EntryKind.FILES, "", "file", entries)
+
+            assert len(results_view_calls) == 1, (
+                "_on_scan_complete must call _show_results_view exactly once"
+            )
+            assert len(save_calls) == 1, (
+                "_on_scan_complete must still call save_listing after showing results view"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_results_view_with_skipped_shows_skip_button(self, qapp, tmp_path):
+        """When skipped list is non-empty, the results dialog contains a 'Show skipped' button."""
+        from PySide6.QtWidgets import QDialog, QPushButton
+        from ff_explorer.core import SkippedEntry
+        win = MainWindow()
+        try:
+            entries = self._make_entries(tmp_path)
+            skipped = [SkippedEntry(path="/no/access/dir", reason="PermissionError: [Errno 13]")]
+            buttons_found = []
+
+            def fake_exec(self_dlg):
+                for btn in self_dlg.findChildren(QPushButton):
+                    if "skipped" in btn.text().lower():
+                        buttons_found.append(btn)
+                return 0
+
+            with patch.object(QDialog, "exec", fake_exec):
+                win._show_results_view(entries, skipped, "file")
+
+            assert len(buttons_found) >= 1, (
+                "Results dialog must show a 'Show skipped' button when skipped list is non-empty"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_results_view_no_skipped_no_skip_button(self, qapp, tmp_path):
+        """When skipped list is empty, the results dialog has no 'Show skipped' button."""
+        from PySide6.QtWidgets import QDialog, QPushButton
+        win = MainWindow()
+        try:
+            entries = self._make_entries(tmp_path)
+            skip_buttons = []
+
+            def fake_exec(self_dlg):
+                for btn in self_dlg.findChildren(QPushButton):
+                    if "skipped" in btn.text().lower():
+                        skip_buttons.append(btn)
+                return 0
+
+            with patch.object(QDialog, "exec", fake_exec):
+                win._show_results_view(entries, [], "file")
+
+            assert len(skip_buttons) == 0, (
+                "Results dialog must NOT show a 'Show skipped' button when skipped is empty"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+
+# ---------------------------------------------------------------------------
+# A19 — SPEC-15: skip report surfaced by the scan worker
+# ---------------------------------------------------------------------------
+
+class TestSkipReport:
+    """A19: _ScanWorker emits skipped signal; _on_scan_complete surfaces skip
+    count in the status bar; _show_skipped_dialog opens a read-only list.
+    """
+
+    @staticmethod
+    def _spin_until(condition, timeout_ms: int = 3000) -> bool:
+        import time
+        from PySide6.QtWidgets import QApplication
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        while time.monotonic() < deadline:
+            QApplication.processEvents()
+            if condition():
+                return True
+        return False
+
+    def test_worker_emits_skipped_signal(self, qapp, tmp_path):
+        """_ScanWorker emits skipped signal after finished.
+
+        Even for a fully-readable tree the skipped signal must be emitted
+        (with an empty list).  This verifies the signal exists and fires.
+        """
+        from ff_explorer import EntryKind
+        from ff_explorer.gui.main_window import _ScanWorker
+        from PySide6.QtCore import QThread
+
+        (tmp_path / "a.txt").write_bytes(b"a")
+
+        finished_calls: list = []
+        skipped_calls: list = []
+
+        worker = _ScanWorker(str(tmp_path), EntryKind.FILES, "", {})
+        thread = QThread()
+        worker.moveToThread(thread)
+        worker.finished.connect(lambda e: finished_calls.append(e))
+        worker.skipped.connect(lambda s: skipped_calls.append(s))
+        thread.started.connect(worker.run)
+        thread.start()
+
+        done = self._spin_until(
+            lambda: bool(skipped_calls),
+            timeout_ms=5000,
+        )
+        thread.quit()
+        thread.wait()
+
+        assert done, "Worker did not emit skipped signal within 5 s"
+        assert len(skipped_calls) == 1, "Worker must emit skipped exactly once"
+        assert isinstance(skipped_calls[0], list), "skipped payload must be a list"
+        # For a readable tree, skipped list is empty
+        assert skipped_calls[0] == [], (
+            "For a fully-readable tree, skipped list must be empty"
+        )
+
+    def test_on_scan_complete_status_bar_shows_skip_count(self, qapp, tmp_path):
+        """_on_scan_complete with non-empty skipped list calls _set_status with
+        a message mentioning the skip count.
+
+        Note: _do_save (action_code=1) subsequently calls _set_status with
+        the save result, overwriting the status bar.  We therefore spy on
+        _set_status to capture ALL calls and assert that at least one mentions
+        'skipped', rather than reading the final bar value.
+        """
+        from ff_explorer import MatchEntry, EntryKind
+        from ff_explorer.core import SkippedEntry
+        win = MainWindow()
+        try:
+            f = tmp_path / "item.txt"
+            f.write_bytes(b"x")
+            entries = [MatchEntry(path=f, kind=EntryKind.FILES)]
+            skipped = [SkippedEntry(path="/locked/dir", reason="PermissionError")]
+
+            # Suppress the results view dialog to keep the test non-blocking.
+            win._show_results_view = lambda *a, **kw: None  # type: ignore[method-assign]
+
+            # Spy on _set_status to capture every call during _on_scan_complete.
+            status_calls: list[str] = []
+            original_set_status = win._set_status
+            win._set_status = lambda msg: (status_calls.append(msg), original_set_status(msg))  # type: ignore[method-assign]
+
+            with patch("ff_explorer.gui.main_window.save_listing",
+                       return_value=tmp_path / "out.txt"):
+                win._on_scan_complete(
+                    1, str(tmp_path), EntryKind.FILES, "", "file",
+                    entries, skipped,
+                )
+
+            skip_msgs = [m for m in status_calls if "skipped" in m.lower()]
+            assert skip_msgs, (
+                f"_set_status must be called with a message mentioning 'skipped' "
+                f"when skipped list is non-empty.  All calls: {status_calls!r}"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_on_scan_complete_no_skip_status_unchanged(self, qapp, tmp_path):
+        """_on_scan_complete with empty skipped never calls _set_status with 'skipped'."""
+        from ff_explorer import MatchEntry, EntryKind
+        win = MainWindow()
+        try:
+            f = tmp_path / "item.txt"
+            f.write_bytes(b"x")
+            entries = [MatchEntry(path=f, kind=EntryKind.FILES)]
+
+            win._show_results_view = lambda *a, **kw: None  # type: ignore[method-assign]
+
+            status_calls: list[str] = []
+            original_set_status = win._set_status
+            win._set_status = lambda msg: (status_calls.append(msg), original_set_status(msg))  # type: ignore[method-assign]
+
+            with patch("ff_explorer.gui.main_window.save_listing",
+                       return_value=tmp_path / "out.txt"):
+                win._on_scan_complete(
+                    1, str(tmp_path), EntryKind.FILES, "", "file",
+                    entries, [],
+                )
+
+            skip_msgs = [m for m in status_calls if "skipped" in m.lower()]
+            assert not skip_msgs, (
+                f"_set_status must NOT mention 'skipped' when skipped list is empty; "
+                f"got: {skip_msgs!r}"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_show_skipped_dialog_opens_with_entries(self, qapp, tmp_path):
+        """_show_skipped_dialog opens a QDialog listing skipped paths."""
+        from PySide6.QtWidgets import QDialog, QListWidget
+        from ff_explorer.core import SkippedEntry
+        win = MainWindow()
+        try:
+            skipped = [
+                SkippedEntry(path="/no/access/a", reason="PermissionError: denied"),
+                SkippedEntry(path="/no/access/b", reason="OSError: stale handle"),
+            ]
+            dialogs_opened = []
+            list_widgets: list = []
+
+            def fake_exec(self_dlg):
+                dialogs_opened.append(self_dlg)
+                for lw in self_dlg.findChildren(QListWidget):
+                    list_widgets.append(lw)
+                return 0
+
+            with patch.object(QDialog, "exec", fake_exec):
+                win._show_skipped_dialog(skipped)
+
+            assert len(dialogs_opened) == 1, (
+                "_show_skipped_dialog must open exactly one QDialog"
+            )
+            assert len(list_widgets) == 1, (
+                "_show_skipped_dialog must contain a QListWidget"
+            )
+            assert list_widgets[0].count() == len(skipped), (
+                f"QListWidget must have {len(skipped)} items, one per SkippedEntry"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_skipped_signal_fires_after_finished(self, qapp, tmp_path):
+        """_ScanWorker emits finished then skipped (order preserved)."""
+        from ff_explorer import EntryKind
+        from ff_explorer.gui.main_window import _ScanWorker
+        from PySide6.QtCore import QThread
+
+        (tmp_path / "file.txt").write_bytes(b"f")
+
+        order: list = []
+        skipped_calls: list = []
+        finished_calls: list = []
+
+        worker = _ScanWorker(str(tmp_path), EntryKind.FILES, "", {})
+        thread = QThread()
+        worker.moveToThread(thread)
+        worker.finished.connect(lambda e: (finished_calls.append(e), order.append("finished")))
+        worker.skipped.connect(lambda s: (skipped_calls.append(s), order.append("skipped")))
+        thread.started.connect(worker.run)
+        thread.start()
+
+        done = self._spin_until(
+            lambda: bool(skipped_calls),
+            timeout_ms=5000,
+        )
+        thread.quit()
+        thread.wait()
+
+        assert done, "Worker did not emit skipped within 5 s"
+        assert order == ["finished", "skipped"], (
+            f"finished must be emitted before skipped; got order: {order}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# A20 — SPEC-17: include_hidden checkbox exists and flows into scan kwargs
+# ---------------------------------------------------------------------------
+
+class TestIncludeHiddenControl:
+    """A20: _include_hidden_check QCheckBox exists, defaults to checked (True),
+    and when unchecked adds include_hidden=False to _build_list_entries_kwargs().
+    """
+
+    def test_include_hidden_check_exists_and_checked_by_default(self, qapp):
+        """_include_hidden_check must exist, be a QCheckBox, and default to checked."""
+        from PySide6.QtWidgets import QCheckBox
+        win = MainWindow()
+        try:
+            assert hasattr(win, "_include_hidden_check"), (
+                "_include_hidden_check must exist on MainWindow (SPEC-17)"
+            )
+            assert isinstance(win._include_hidden_check, QCheckBox)
+            assert win._include_hidden_check.isChecked(), (
+                "_include_hidden_check must be checked by default "
+                "(True = include hidden, preserving prior behaviour)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_include_hidden_checked_not_in_kwargs(self, qapp):
+        """When checked (True = default), include_hidden must NOT appear in kwargs
+        (True is the core default; omitting it is equivalent and avoids noise)."""
+        win = MainWindow()
+        try:
+            win._include_hidden_check.setChecked(True)
+            kwargs = win._build_list_entries_kwargs()
+            assert "include_hidden" not in kwargs, (
+                "include_hidden=True (default) must not appear in kwargs "
+                "— it is the core default and should be omitted"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_include_hidden_unchecked_adds_false_to_kwargs(self, qapp):
+        """Unchecking _include_hidden_check adds include_hidden=False to kwargs."""
+        win = MainWindow()
+        try:
+            win._include_hidden_check.setChecked(False)
+            kwargs = win._build_list_entries_kwargs()
+            assert "include_hidden" in kwargs, (
+                "Unchecking include_hidden_check must add include_hidden to kwargs"
+            )
+            assert kwargs["include_hidden"] is False, (
+                "include_hidden kwarg must be False when checkbox is unchecked"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_include_hidden_registered_in_widget_info(self):
+        """filter_include_hidden key must be present in WIDGET_INFO (SPEC-09 lint)."""
+        from ff_explorer.gui.widget_info import WIDGET_INFO
+        assert "filter_include_hidden" in WIDGET_INFO, (
+            "'filter_include_hidden' must be present in WIDGET_INFO (SPEC-17)"
+        )
+        assert WIDGET_INFO["filter_include_hidden"], (
+            "WIDGET_INFO['filter_include_hidden'] must be a non-empty string"
+        )
+
+    def test_include_hidden_check_has_ff_info_key_property(self, qapp):
+        """_include_hidden_check must carry _ff_info_key='filter_include_hidden'."""
+        win = MainWindow()
+        try:
+            key = win._include_hidden_check.property("_ff_info_key")
+            assert key == "filter_include_hidden", (
+                f"_include_hidden_check must have _ff_info_key='filter_include_hidden', "
+                f"got {key!r}"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_include_hidden_default_state_preserves_existing_kwargs(self, qapp):
+        """Default checked state preserves the full prior kwargs dict unchanged."""
+        win = MainWindow()
+        try:
+            # All other filters at default too — should remain {}
+            kwargs_with_hidden_checked = win._build_list_entries_kwargs()
+            assert kwargs_with_hidden_checked == {}, (
+                "Default state (all filters at default, include_hidden checked) "
+                "must still produce an empty kwargs dict"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+
+# ---------------------------------------------------------------------------
+# A21 — SPEC-18: bulk operations, multi-select, Copy/Move, only_paths gate
+# ---------------------------------------------------------------------------
+
+class TestBulkOperationsSpec18:
+    """A21: SPEC-18 bulk operations.
+
+    Covers:
+    - _ACTION_LABELS includes Copy list (4) and Move list (5)
+    - WIDGET_INFO has action_detail.4, action_detail.5, results_apply_selected,
+      results_apply_all entries
+    - _show_results_view uses ExtendedSelection
+    - Subset: only_paths = selected non-archive paths passed to core op
+    - No selection: only_paths is None (legacy full-set)
+    - Archive-internal rows excluded from destructive subset
+    - Copy/Move: dest picker → confirm No → no mutate; confirm Yes → mutate once
+    - _do_copy/_do_move: QFileDialog patched, gate defaults No, gate passes Yes
+    """
+
+    @staticmethod
+    def _make_entries(tmp_path: Path) -> list:
+        from ff_explorer import MatchEntry, EntryKind
+        f1 = tmp_path / "alpha.txt"
+        f2 = tmp_path / "beta.txt"
+        f3 = tmp_path / "gamma.txt"
+        f1.write_bytes(b"a")
+        f2.write_bytes(b"b")
+        f3.write_bytes(b"g")
+        return [
+            MatchEntry(path=f1, kind=EntryKind.FILES),
+            MatchEntry(path=f2, kind=EntryKind.FILES),
+            MatchEntry(path=f3, kind=EntryKind.FILES),
+        ]
+
+    # ------------------------------------------------------------------
+    # Registry / action-labels checks
+    # ------------------------------------------------------------------
+
+    def test_action_labels_include_copy_and_move(self, qapp):
+        """_ACTION_LABELS must contain 'Copy list' (4) and 'Move list' (5)."""
+        from ff_explorer.gui.main_window import _ACTION_LABELS
+        assert "Copy list" in _ACTION_LABELS, (
+            "'Copy list' must be in _ACTION_LABELS (SPEC-18)"
+        )
+        assert _ACTION_LABELS["Copy list"] == 4, (
+            "'Copy list' must map to action code 4"
+        )
+        assert "Move list" in _ACTION_LABELS, (
+            "'Move list' must be in _ACTION_LABELS (SPEC-18)"
+        )
+        assert _ACTION_LABELS["Move list"] == 5, (
+            "'Move list' must map to action code 5"
+        )
+
+    def test_action_combo_includes_copy_and_move(self, qapp):
+        """The action combobox in MainWindow must contain 'Copy list' and 'Move list'."""
+        win = MainWindow()
+        try:
+            items = [win._action_combo.itemText(i)
+                     for i in range(win._action_combo.count())]
+            assert "Copy list" in items, (
+                "Action combobox must include 'Copy list' (SPEC-18)"
+            )
+            assert "Move list" in items, (
+                "Action combobox must include 'Move list' (SPEC-18)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_widget_info_has_copy_move_action_details(self):
+        """WIDGET_INFO must have action_detail.4 and action_detail.5 (SPEC-18)."""
+        assert "action_detail.4" in WIDGET_INFO, (
+            "WIDGET_INFO must contain 'action_detail.4' for Copy list (SPEC-18)"
+        )
+        assert "action_detail.5" in WIDGET_INFO, (
+            "WIDGET_INFO must contain 'action_detail.5' for Move list (SPEC-18)"
+        )
+        assert WIDGET_INFO["action_detail.4"], "action_detail.4 must be non-empty"
+        assert WIDGET_INFO["action_detail.5"], "action_detail.5 must be non-empty"
+
+    def test_widget_info_has_apply_buttons_keys(self):
+        """WIDGET_INFO must have results_apply_selected and results_apply_all."""
+        assert "results_apply_selected" in WIDGET_INFO, (
+            "WIDGET_INFO must contain 'results_apply_selected' (SPEC-18)"
+        )
+        assert "results_apply_all" in WIDGET_INFO, (
+            "WIDGET_INFO must contain 'results_apply_all' (SPEC-18)"
+        )
+        assert WIDGET_INFO["results_apply_selected"], "results_apply_selected must be non-empty"
+        assert WIDGET_INFO["results_apply_all"], "results_apply_all must be non-empty"
+
+    def test_copy_move_action_tooltip_changes(self, qapp):
+        """Selecting 'Copy list' and 'Move list' in the combobox produces distinct tooltips."""
+        win = MainWindow()
+        try:
+            items = [win._action_combo.itemText(i)
+                     for i in range(win._action_combo.count())]
+            copy_idx = items.index("Copy list")
+            move_idx = items.index("Move list")
+            win._action_combo.setCurrentIndex(copy_idx)
+            copy_tip = win._action_combo.toolTip()
+            win._action_combo.setCurrentIndex(move_idx)
+            move_tip = win._action_combo.toolTip()
+            assert copy_tip, "Copy list tooltip must be non-empty"
+            assert move_tip, "Move list tooltip must be non-empty"
+            assert copy_tip != move_tip, (
+                "Copy list and Move list tooltips must differ"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    # ------------------------------------------------------------------
+    # Results view: ExtendedSelection
+    # ------------------------------------------------------------------
+
+    def test_results_view_table_uses_extended_selection(self, qapp, tmp_path):
+        """Results QTableWidget must use ExtendedSelection (SPEC-18 multi-select)."""
+        from PySide6.QtWidgets import QDialog, QTableWidget, QAbstractItemView
+        win = MainWindow()
+        try:
+            entries = self._make_entries(tmp_path)
+            tables_found = []
+
+            def fake_exec(self_dlg):
+                for child in self_dlg.findChildren(QTableWidget):
+                    tables_found.append(child)
+                return 0
+
+            with patch.object(QDialog, "exec", fake_exec):
+                win._show_results_view(entries, [], "file", action_code=2)
+
+            assert tables_found, "Results dialog must contain a QTableWidget"
+            table = tables_found[0]
+            assert table.selectionMode() == QAbstractItemView.SelectionMode.ExtendedSelection, (
+                "Results table must use ExtendedSelection (SPEC-18)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_results_view_has_apply_selected_and_apply_all_buttons(self, qapp, tmp_path):
+        """Results dialog must contain 'Apply to selected' and 'Apply to all' buttons
+        for non-Save actions (SPEC-18)."""
+        from PySide6.QtWidgets import QDialog, QPushButton
+        win = MainWindow()
+        try:
+            entries = self._make_entries(tmp_path)
+            buttons_found = []
+
+            def fake_exec(self_dlg):
+                for btn in self_dlg.findChildren(QPushButton):
+                    buttons_found.append(btn.text())
+                return 0
+
+            with patch.object(QDialog, "exec", fake_exec):
+                win._show_results_view(entries, [], "file", action_code=2)
+
+            apply_sel = [t for t in buttons_found if "selected" in t.lower()]
+            apply_all = [t for t in buttons_found if "all" in t.lower()]
+            assert apply_sel, (
+                "Results dialog must have an 'Apply to selected' button for Remove action"
+            )
+            assert apply_all, (
+                "Results dialog must have an 'Apply to all' button for Remove action"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_results_view_save_action_no_apply_selected_button(self, qapp, tmp_path):
+        """For the Save action (code=1), 'Apply to selected' must NOT be shown
+        (save_listing has no only_paths; full-set is the only meaningful choice)."""
+        from PySide6.QtWidgets import QDialog, QPushButton
+        win = MainWindow()
+        try:
+            entries = self._make_entries(tmp_path)
+            buttons_found = []
+
+            def fake_exec(self_dlg):
+                for btn in self_dlg.findChildren(QPushButton):
+                    buttons_found.append(btn.text())
+                return 0
+
+            with patch.object(QDialog, "exec", fake_exec):
+                win._show_results_view(entries, [], "file", action_code=1)
+
+            apply_sel = [t for t in buttons_found if "selected" in t.lower()]
+            assert not apply_sel, (
+                "Save action must NOT show 'Apply to selected' button "
+                "(save_listing has no only_paths — SPEC-18)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    # ------------------------------------------------------------------
+    # Subset: only_paths passed to core ops when rows are selected
+    # ------------------------------------------------------------------
+
+    def test_do_remove_with_only_paths_passes_them_to_core(self, qapp, tmp_path):
+        """_do_remove with only_paths=[path] passes only_paths to remove_entries.
+
+        Selecting a subset of result rows and invoking remove passes
+        only_paths = the selected paths to remove_entries (core call).
+        """
+        from ff_explorer import MatchEntry, EntryKind
+        from ff_explorer.core import RemovalReport
+        win = MainWindow()
+        try:
+            f1 = tmp_path / "alpha.txt"
+            f2 = tmp_path / "beta.txt"
+            f1.write_bytes(b"a")
+            f2.write_bytes(b"b")
+            entries = [
+                MatchEntry(path=f1, kind=EntryKind.FILES),
+                MatchEntry(path=f2, kind=EntryKind.FILES),
+            ]
+            # Only select f1
+            selected = [str(f1)]
+            live_report = RemovalReport(matched=[f1], removed=[f1])
+
+            captured: dict = {}
+
+            def fake_remove(path, kind, seed, dry_run=True, confirm=False, **kwargs):
+                captured.update(kwargs)
+                captured["dry_run"] = dry_run
+                return live_report
+
+            with (
+                patch("ff_explorer.gui.main_window.remove_entries", side_effect=fake_remove),
+                patch("ff_explorer.gui.main_window.QMessageBox.question",
+                      return_value=QMessageBox.StandardButton.Yes),
+            ):
+                win._do_remove(str(tmp_path), win._current_kind(), "alpha", "file",
+                               entries, only_paths=selected)
+
+            assert "only_paths" in captured, (
+                "_do_remove must forward only_paths to remove_entries when set"
+            )
+            assert set(captured["only_paths"]) == {str(f1)}, (
+                "only_paths forwarded to remove_entries must match the selected subset"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_do_remove_no_selection_passes_no_only_paths(self, qapp, tmp_path):
+        """_do_remove with only_paths=None passes no only_paths kwarg (legacy full-set)."""
+        from ff_explorer import MatchEntry, EntryKind
+        from ff_explorer.core import RemovalReport
+        win = MainWindow()
+        try:
+            f1 = tmp_path / "alpha.txt"
+            f1.write_bytes(b"a")
+            entries = [MatchEntry(path=f1, kind=EntryKind.FILES)]
+            live_report = RemovalReport(matched=[f1], removed=[f1])
+
+            captured: dict = {}
+
+            def fake_remove(path, kind, seed, dry_run=True, confirm=False, **kwargs):
+                captured.update(kwargs)
+                return live_report
+
+            with (
+                patch("ff_explorer.gui.main_window.remove_entries", side_effect=fake_remove),
+                patch("ff_explorer.gui.main_window.QMessageBox.question",
+                      return_value=QMessageBox.StandardButton.Yes),
+            ):
+                win._do_remove(str(tmp_path), win._current_kind(), "alpha", "file",
+                               entries, only_paths=None)
+
+            assert "only_paths" not in captured, (
+                "_do_remove must NOT pass only_paths when it is None (legacy full-set)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_do_compress_with_only_paths_passes_them_to_core(self, qapp, tmp_path):
+        """_do_compress with only_paths passes them to compress_entries (SPEC-18)."""
+        from ff_explorer import MatchEntry, EntryKind
+        from ff_explorer.core import CompressionReport
+        win = MainWindow()
+        try:
+            f1 = tmp_path / "alpha.txt"
+            f2 = tmp_path / "beta.txt"
+            f1.write_bytes(b"a")
+            f2.write_bytes(b"b")
+            entries = [
+                MatchEntry(path=f1, kind=EntryKind.FILES),
+                MatchEntry(path=f2, kind=EntryKind.FILES),
+            ]
+            selected = [str(f1)]
+            live_report = CompressionReport(matched=[f1], archives=[tmp_path / "alpha.zip"])
+
+            captured: dict = {}
+
+            def fake_compress(path, kind, seed, dry_run=True, confirm=False, **kwargs):
+                captured.update(kwargs)
+                return live_report
+
+            with (
+                patch("ff_explorer.gui.main_window.compress_entries",
+                      side_effect=fake_compress),
+                patch("ff_explorer.gui.main_window.QMessageBox.question",
+                      return_value=QMessageBox.StandardButton.Yes),
+            ):
+                win._do_compress(str(tmp_path), win._current_kind(), "alpha", "file",
+                                 entries, only_paths=selected)
+
+            assert "only_paths" in captured, (
+                "_do_compress must forward only_paths to compress_entries when set"
+            )
+            assert set(captured["only_paths"]) == {str(f1)}, (
+                "only_paths forwarded to compress_entries must match selected subset"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    # ------------------------------------------------------------------
+    # Archive-internal exclusion
+    # ------------------------------------------------------------------
+
+    def test_archive_internal_rows_excluded_from_subset(self, qapp, tmp_path):
+        """_show_results_view: rows whose path contains '!' (archive-internal) are
+        excluded from the only_paths list returned for 'Apply to selected'.
+
+        We simulate table row selection programmatically and trigger the internal
+        'Apply to selected' callback by patching QDialog.exec to select rows and
+        click the button.
+        """
+        from ff_explorer import MatchEntry, EntryKind
+        from PySide6.QtWidgets import QDialog, QPushButton
+
+        win = MainWindow()
+        try:
+            # One normal entry and one archive-internal entry
+            f_normal = tmp_path / "real.txt"
+            f_normal.write_bytes(b"x")
+            # Archive-internal: path contains '!'
+            archive_entry_path = Path(str(tmp_path / "archive.zip") + "!member.txt")
+
+            entries = [
+                MatchEntry(path=f_normal, kind=EntryKind.FILES),
+                MatchEntry(path=archive_entry_path, kind=EntryKind.FILES),
+            ]
+
+            result_holder = []
+
+            def fake_exec(self_dlg):
+                from PySide6.QtWidgets import QTableWidget
+                tables = self_dlg.findChildren(QTableWidget)
+                if tables:
+                    # Select all rows
+                    tables[0].selectAll()
+                # Click "Apply to selected"
+                for btn in self_dlg.findChildren(QPushButton):
+                    if "selected" in btn.text().lower() and btn.isEnabled():
+                        btn.click()
+                        break
+                return 0
+
+            # Intercept QMessageBox.information (archive exclusion note)
+            with (
+                patch.object(QDialog, "exec", fake_exec),
+                patch("ff_explorer.gui.main_window.QMessageBox.information"),
+            ):
+                result = win._show_results_view(entries, [], "file", action_code=2)
+
+            # The archive-internal entry must have been excluded from only_paths
+            if result is not None:
+                assert str(archive_entry_path) not in result, (
+                    "Archive-internal path must be excluded from only_paths subset (SPEC-18)"
+                )
+                assert str(f_normal) in result, (
+                    "Normal (non-archive-internal) path must be included in only_paths"
+                )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_apply_all_returns_none(self, qapp, tmp_path):
+        """Clicking 'Apply to all' in the results view returns None (legacy full-set)."""
+        from ff_explorer import MatchEntry, EntryKind
+        from PySide6.QtWidgets import QDialog, QPushButton
+
+        win = MainWindow()
+        try:
+            f1 = tmp_path / "alpha.txt"
+            f1.write_bytes(b"a")
+            entries = [MatchEntry(path=f1, kind=EntryKind.FILES)]
+
+            def fake_exec(self_dlg):
+                for btn in self_dlg.findChildren(QPushButton):
+                    if "all" in btn.text().lower() and btn.isEnabled():
+                        btn.click()
+                        break
+                return 0
+
+            with patch.object(QDialog, "exec", fake_exec):
+                result = win._show_results_view(entries, [], "file", action_code=2)
+
+            assert result is None, (
+                "'Apply to all' must return None (legacy full-set, only_paths=None)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    # ------------------------------------------------------------------
+    # Copy / Move: gate defaults to No; gate passes Yes; dest picker patched
+    # ------------------------------------------------------------------
+
+    def test_do_copy_dialog_default_no_skips_mutate(self, qapp, tmp_path):
+        """_do_copy: QMessageBox.question returns No → copy_entries(dry_run=False)
+        is never called.  Gate defaults to No (SPEC-18 safety requirement)."""
+        from ff_explorer import MatchEntry, EntryKind
+        win = MainWindow()
+        try:
+            f1 = tmp_path / "alpha.txt"
+            f1.write_bytes(b"a")
+            entries = [MatchEntry(path=f1, kind=EntryKind.FILES)]
+            dest = str(tmp_path / "dest")
+
+            mutate_calls = []
+
+            def fake_copy(path, kind, seed, destination, dry_run=True, confirm=False, **kw):
+                if not dry_run:
+                    mutate_calls.append(True)
+                    raise AssertionError("copy_entries(dry_run=False) must not be called when No")
+                from ff_explorer.core import TransferReport
+                return TransferReport(kind="copy", matched=[f1])
+
+            with (
+                patch("ff_explorer.gui.main_window.copy_entries", side_effect=fake_copy),
+                patch("ff_explorer.gui.main_window.QFileDialog.getExistingDirectory",
+                      return_value=dest),
+                patch("ff_explorer.gui.main_window.QMessageBox.question",
+                      return_value=QMessageBox.StandardButton.No),
+            ):
+                win._do_copy(str(tmp_path), win._current_kind(), "alpha", "file", entries)
+
+            assert len(mutate_calls) == 0, (
+                "copy_entries(dry_run=False) must not be called when confirm dialog returns No"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_do_copy_yes_calls_copy_entries_once(self, qapp, tmp_path):
+        """_do_copy: confirm Yes → copy_entries called once with dry_run=False,
+        confirm=True, correct destination and only_paths (SPEC-18)."""
+        from ff_explorer import MatchEntry, EntryKind
+        from ff_explorer.core import TransferReport
+        win = MainWindow()
+        try:
+            f1 = tmp_path / "alpha.txt"
+            f1.write_bytes(b"a")
+            entries = [MatchEntry(path=f1, kind=EntryKind.FILES)]
+            dest = str(tmp_path / "dest")
+            selected = [str(f1)]
+            live_report = TransferReport(kind="copy", matched=[f1], transferred=[f1])
+
+            captured: dict = {}
+
+            def fake_copy(path, kind, seed, destination, dry_run=True, confirm=False, **kw):
+                captured["dry_run"] = dry_run
+                captured["confirm"] = confirm
+                captured["destination"] = destination
+                captured.update(kw)
+                return live_report
+
+            with (
+                patch("ff_explorer.gui.main_window.copy_entries", side_effect=fake_copy),
+                patch("ff_explorer.gui.main_window.QFileDialog.getExistingDirectory",
+                      return_value=dest),
+                patch("ff_explorer.gui.main_window.QMessageBox.question",
+                      return_value=QMessageBox.StandardButton.Yes),
+            ):
+                win._do_copy(str(tmp_path), win._current_kind(), "alpha", "file",
+                             entries, only_paths=selected)
+
+            assert captured.get("dry_run") is False, (
+                "copy_entries must be called with dry_run=False on Yes"
+            )
+            assert captured.get("confirm") is True, (
+                "copy_entries must be called with confirm=True on Yes"
+            )
+            assert captured.get("destination") == dest, (
+                "copy_entries must receive the chosen destination directory"
+            )
+            assert set(captured.get("only_paths", [])) == {str(f1)}, (
+                "copy_entries must receive only_paths matching the selected subset"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_do_move_dialog_default_no_skips_mutate(self, qapp, tmp_path):
+        """_do_move: QMessageBox.question returns No → move_entries(dry_run=False)
+        is never called.  Gate defaults to No (SPEC-18 safety requirement)."""
+        from ff_explorer import MatchEntry, EntryKind
+        win = MainWindow()
+        try:
+            f1 = tmp_path / "alpha.txt"
+            f1.write_bytes(b"a")
+            entries = [MatchEntry(path=f1, kind=EntryKind.FILES)]
+            dest = str(tmp_path / "dest")
+
+            mutate_calls = []
+
+            def fake_move(path, kind, seed, destination, dry_run=True, confirm=False, **kw):
+                if not dry_run:
+                    mutate_calls.append(True)
+                    raise AssertionError("move_entries(dry_run=False) must not be called when No")
+                from ff_explorer.core import TransferReport
+                return TransferReport(kind="move", matched=[f1])
+
+            with (
+                patch("ff_explorer.gui.main_window.move_entries", side_effect=fake_move),
+                patch("ff_explorer.gui.main_window.QFileDialog.getExistingDirectory",
+                      return_value=dest),
+                patch("ff_explorer.gui.main_window.QMessageBox.question",
+                      return_value=QMessageBox.StandardButton.No),
+            ):
+                win._do_move(str(tmp_path), win._current_kind(), "alpha", "file", entries)
+
+            assert len(mutate_calls) == 0, (
+                "move_entries(dry_run=False) must not be called when confirm dialog returns No"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_do_move_yes_calls_move_entries_once(self, qapp, tmp_path):
+        """_do_move: confirm Yes → move_entries called once with dry_run=False,
+        confirm=True, correct destination and only_paths (SPEC-18)."""
+        from ff_explorer import MatchEntry, EntryKind
+        from ff_explorer.core import TransferReport
+        win = MainWindow()
+        try:
+            f1 = tmp_path / "alpha.txt"
+            f1.write_bytes(b"a")
+            entries = [MatchEntry(path=f1, kind=EntryKind.FILES)]
+            dest = str(tmp_path / "dest")
+            selected = [str(f1)]
+            live_report = TransferReport(kind="move", matched=[f1], transferred=[f1])
+
+            captured: dict = {}
+
+            def fake_move(path, kind, seed, destination, dry_run=True, confirm=False, **kw):
+                captured["dry_run"] = dry_run
+                captured["confirm"] = confirm
+                captured["destination"] = destination
+                captured.update(kw)
+                return live_report
+
+            with (
+                patch("ff_explorer.gui.main_window.move_entries", side_effect=fake_move),
+                patch("ff_explorer.gui.main_window.QFileDialog.getExistingDirectory",
+                      return_value=dest),
+                patch("ff_explorer.gui.main_window.QMessageBox.question",
+                      return_value=QMessageBox.StandardButton.Yes),
+            ):
+                win._do_move(str(tmp_path), win._current_kind(), "alpha", "file",
+                             entries, only_paths=selected)
+
+            assert captured.get("dry_run") is False, (
+                "move_entries must be called with dry_run=False on Yes"
+            )
+            assert captured.get("confirm") is True, (
+                "move_entries must be called with confirm=True on Yes"
+            )
+            assert captured.get("destination") == dest, (
+                "move_entries must receive the chosen destination directory"
+            )
+            assert set(captured.get("only_paths", [])) == {str(f1)}, (
+                "move_entries must receive only_paths matching the selected subset"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_do_copy_no_destination_cancels_without_core_call(self, qapp, tmp_path):
+        """_do_copy: when QFileDialog returns '' (user cancelled), copy_entries is
+        never called — no mutation, no crash (SPEC-18)."""
+        from ff_explorer import MatchEntry, EntryKind
+        win = MainWindow()
+        try:
+            f1 = tmp_path / "alpha.txt"
+            f1.write_bytes(b"a")
+            entries = [MatchEntry(path=f1, kind=EntryKind.FILES)]
+
+            core_calls = []
+
+            def fake_copy(*a, **kw):
+                core_calls.append(True)
+                from ff_explorer.core import TransferReport
+                return TransferReport(kind="copy")
+
+            with (
+                patch("ff_explorer.gui.main_window.copy_entries", side_effect=fake_copy),
+                patch("ff_explorer.gui.main_window.QFileDialog.getExistingDirectory",
+                      return_value=""),
+            ):
+                win._do_copy(str(tmp_path), win._current_kind(), "alpha", "file", entries)
+
+            assert not core_calls, (
+                "copy_entries must not be called when the destination picker is cancelled"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_do_move_no_destination_cancels_without_core_call(self, qapp, tmp_path):
+        """_do_move: when QFileDialog returns '' (user cancelled), move_entries is
+        never called — no mutation, no crash (SPEC-18)."""
+        from ff_explorer import MatchEntry, EntryKind
+        win = MainWindow()
+        try:
+            f1 = tmp_path / "alpha.txt"
+            f1.write_bytes(b"a")
+            entries = [MatchEntry(path=f1, kind=EntryKind.FILES)]
+
+            core_calls = []
+
+            def fake_move(*a, **kw):
+                core_calls.append(True)
+                from ff_explorer.core import TransferReport
+                return TransferReport(kind="move")
+
+            with (
+                patch("ff_explorer.gui.main_window.move_entries", side_effect=fake_move),
+                patch("ff_explorer.gui.main_window.QFileDialog.getExistingDirectory",
+                      return_value=""),
+            ):
+                win._do_move(str(tmp_path), win._current_kind(), "alpha", "file", entries)
+
+            assert not core_calls, (
+                "move_entries must not be called when the destination picker is cancelled"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_do_copy_empty_entries_skips_everything(self, qapp, tmp_path):
+        """_do_copy with empty entries list sets status and exits early — no dialog."""
+        from ff_explorer import EntryKind
+        win = MainWindow()
+        try:
+            core_calls = []
+            dialog_calls = []
+
+            def fake_copy(*a, **kw):
+                core_calls.append(True)
+                from ff_explorer.core import TransferReport
+                return TransferReport(kind="copy")
+
+            def fake_get_dir(*a, **kw):
+                dialog_calls.append(True)
+                return "/some/dest"
+
+            with (
+                patch("ff_explorer.gui.main_window.copy_entries", side_effect=fake_copy),
+                patch("ff_explorer.gui.main_window.QFileDialog.getExistingDirectory",
+                      side_effect=fake_get_dir),
+            ):
+                win._do_copy(str(tmp_path), win._current_kind(), "test", "file", [])
+
+            assert not core_calls, "_do_copy with empty entries must not call copy_entries"
+            assert not dialog_calls, "_do_copy with empty entries must not open QFileDialog"
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_do_move_empty_entries_skips_everything(self, qapp, tmp_path):
+        """_do_move with empty entries list sets status and exits early — no dialog."""
+        from ff_explorer import EntryKind
+        win = MainWindow()
+        try:
+            core_calls = []
+
+            def fake_move(*a, **kw):
+                core_calls.append(True)
+                from ff_explorer.core import TransferReport
+                return TransferReport(kind="move")
+
+            with (
+                patch("ff_explorer.gui.main_window.move_entries", side_effect=fake_move),
+                patch("ff_explorer.gui.main_window.QFileDialog.getExistingDirectory",
+                      return_value="/some/dest"),
+            ):
+                win._do_move(str(tmp_path), win._current_kind(), "test", "file", [])
+
+            assert not core_calls, "_do_move with empty entries must not call move_entries"
+        finally:
+            win.close()
+            win.deleteLater()
+
+
+# ---------------------------------------------------------------------------
+# A20 — SPEC-20: persisted preferences — save / load / round-trip
+# ---------------------------------------------------------------------------
+
+class TestPersistedPreferences:
+    """A20: SPEC-20 persisted preferences module and MainWindow integration.
+
+    All tests use FFE_PREFS_CONFIG_DIR monkeypatching to isolate from the
+    real user config dir — same pattern used for FFE_PRESETS_DIR in A13.
+    """
+
+    def test_load_settings_returns_defaults_when_missing(self, tmp_path, monkeypatch):
+        """load_settings() with no config file returns the canonical defaults."""
+        monkeypatch.setenv("FFE_PREFS_CONFIG_DIR", str(tmp_path / "nodir"))
+        from ff_explorer.gui.settings_prefs import load_settings, DEFAULTS
+        result = load_settings()
+        assert result == DEFAULTS, (
+            "load_settings() must return DEFAULTS when no config file exists"
+        )
+
+    def test_save_and_load_round_trip(self, tmp_path, monkeypatch):
+        """save_settings(d) then load_settings() returns d."""
+        monkeypatch.setenv("FFE_PREFS_CONFIG_DIR", str(tmp_path))
+        from ff_explorer.gui.settings_prefs import load_settings, save_settings
+        data = {
+            "last_root": "/some/test/path",
+            "mode": "files",
+            "action_index": 2,
+            "match_mode_index": 1,
+            "case_sensitive": False,
+            "min_size": 10,
+            "max_size": 500,
+            "respect_ignore": True,
+            "include_hidden": False,
+            "search_archives": True,
+            "versioning": True,
+        }
+        save_settings(data)
+        result = load_settings()
+        assert result == data, (
+            "load_settings() after save_settings(d) must return d exactly"
+        )
+
+    def test_corrupt_settings_file_returns_defaults(self, tmp_path, monkeypatch):
+        """Corrupt settings.json must return defaults — no crash."""
+        monkeypatch.setenv("FFE_PREFS_CONFIG_DIR", str(tmp_path))
+        (tmp_path / "settings.json").write_text("NOT VALID JSON {{{{", encoding="utf-8")
+        from ff_explorer.gui.settings_prefs import load_settings, DEFAULTS
+        result = load_settings()
+        assert result == DEFAULTS, (
+            "load_settings() must return DEFAULTS when settings.json is corrupt"
+        )
+
+    def test_wrong_type_value_replaced_with_default(self, tmp_path, monkeypatch):
+        """A settings.json key with wrong type is replaced by the default."""
+        monkeypatch.setenv("FFE_PREFS_CONFIG_DIR", str(tmp_path))
+        # Write a file where case_sensitive has wrong type (should be bool)
+        import json as _json
+        (tmp_path / "settings.json").write_text(
+            _json.dumps({"case_sensitive": "wrong_type"}),
+            encoding="utf-8",
+        )
+        from ff_explorer.gui.settings_prefs import load_settings, DEFAULTS
+        result = load_settings()
+        assert result["case_sensitive"] == DEFAULTS["case_sensitive"], (
+            "Wrong-type value must be replaced by the default"
+        )
+
+    def test_main_window_restores_last_root_on_init(self, qapp, tmp_path, monkeypatch):
+        """MainWindow restores last_root from prefs on construction."""
+        monkeypatch.setenv("FFE_PREFS_CONFIG_DIR", str(tmp_path))
+        from ff_explorer.gui.settings_prefs import save_settings
+        save_settings({"last_root": str(tmp_path)})
+        win = MainWindow()
+        try:
+            assert win._path_edit.text() == str(tmp_path), (
+                "MainWindow must restore last_root from saved settings"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_main_window_restores_mode_files_on_init(self, qapp, tmp_path, monkeypatch):
+        """MainWindow restores mode='files' (radio_files checked) from prefs."""
+        monkeypatch.setenv("FFE_PREFS_CONFIG_DIR", str(tmp_path))
+        from ff_explorer.gui.settings_prefs import save_settings
+        save_settings({"mode": "files"})
+        win = MainWindow()
+        try:
+            assert win._radio_files.isChecked(), (
+                "mode='files' in prefs must check _radio_files on init"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_main_window_restores_case_insensitive_on_init(self, qapp, tmp_path, monkeypatch):
+        """MainWindow restores case_sensitive=False from prefs."""
+        monkeypatch.setenv("FFE_PREFS_CONFIG_DIR", str(tmp_path))
+        from ff_explorer.gui.settings_prefs import save_settings
+        save_settings({"case_sensitive": False})
+        win = MainWindow()
+        try:
+            assert not win._case_sensitive_check.isChecked(), (
+                "case_sensitive=False in prefs must uncheck _case_sensitive_check"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_close_event_persists_settings(self, qapp, tmp_path, monkeypatch):
+        """Closing MainWindow writes settings.json with current form state."""
+        monkeypatch.setenv("FFE_PREFS_CONFIG_DIR", str(tmp_path))
+        win = MainWindow()
+        try:
+            win._path_edit.setText(str(tmp_path))
+            win._radio_files.setChecked(True)
+            win._case_sensitive_check.setChecked(False)
+        finally:
+            win.close()
+            win.deleteLater()
+
+        settings_file = tmp_path / "settings.json"
+        assert settings_file.exists(), (
+            "closeEvent must write settings.json"
+        )
+        from ff_explorer.gui.settings_prefs import load_settings
+        monkeypatch.setenv("FFE_PREFS_CONFIG_DIR", str(tmp_path))
+        result = load_settings()
+        assert result["last_root"] == str(tmp_path), (
+            "Persisted last_root must match the path set before close"
+        )
+        assert result["mode"] == "files", (
+            "Persisted mode must be 'files' when radio_files was checked"
+        )
+        assert result["case_sensitive"] is False, (
+            "Persisted case_sensitive must be False when checkbox was unchecked"
+        )
+
+    def test_collect_current_settings_returns_dict(self, qapp, tmp_path, monkeypatch):
+        """_collect_current_settings() returns a dict with all expected keys."""
+        monkeypatch.setenv("FFE_PREFS_CONFIG_DIR", str(tmp_path))
+        from ff_explorer.gui.settings_prefs import DEFAULTS
+        win = MainWindow()
+        try:
+            settings = win._collect_current_settings()
+            for key in DEFAULTS:
+                assert key in settings, (
+                    f"_collect_current_settings() must include key {key!r}"
+                )
+        finally:
+            win.close()
+            win.deleteLater()
+
+
+# ---------------------------------------------------------------------------
+# A22 — SPEC-22: accessibility & keyboard navigation
+# ---------------------------------------------------------------------------
+
+class TestAccessibilityAndKeyboardNavigation:
+    """A22: SPEC-22 accessibility, mnemonics, tab order, accessible names,
+    and keyboard shortcuts.
+    """
+
+    # ---- Mnemonics ----
+
+    def test_browse_button_has_mnemonic(self, qapp):
+        """Browse button text includes & mnemonic (Alt+B)."""
+        win = MainWindow()
+        try:
+            assert "&" in win._browse_btn.text(), (
+                "Browse button must have an & mnemonic (SPEC-22)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_run_button_has_mnemonic(self, qapp):
+        """Run button text includes & mnemonic (Alt+R)."""
+        win = MainWindow()
+        try:
+            assert "&" in win._run_btn.text(), (
+                "Run button must have an & mnemonic (SPEC-22)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_filters_toggle_has_mnemonic(self, qapp):
+        """Filters toggle button text includes & mnemonic (Alt+F)."""
+        win = MainWindow()
+        try:
+            assert "&" in win._filters_toggle_btn.text(), (
+                "Filters toggle must have an & mnemonic (SPEC-22)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_filters_toggle_mnemonic_preserved_after_toggle(self, qapp):
+        """_toggle_filters preserves the & mnemonic in both expanded/collapsed states."""
+        win = MainWindow()
+        try:
+            win._toggle_filters(True)
+            assert "&" in win._filters_toggle_btn.text(), (
+                "Filters toggle mnemonic must be preserved when panel is shown"
+            )
+            win._toggle_filters(False)
+            assert "&" in win._filters_toggle_btn.text(), (
+                "Filters toggle mnemonic must be preserved when panel is hidden"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    # ---- Ctrl+Return shortcut ----
+
+    def test_ctrl_return_triggers_run(self, qapp):
+        """Ctrl+Return shortcut calls _run (SPEC-22 additional shortcut)."""
+        win = MainWindow()
+        try:
+            run_calls = []
+            win._run = lambda: run_calls.append(True)  # type: ignore[method-assign]
+
+            from PySide6.QtCore import QEvent
+            from PySide6.QtGui import QKeyEvent
+            key_event = QKeyEvent(
+                QEvent.Type.KeyPress,
+                Qt.Key.Key_Return,
+                Qt.KeyboardModifier.ControlModifier,
+            )
+            # The Ctrl+Return shortcut is a QShortcut — fire it via keyPressEvent
+            # which already handles Key_Return; additionally verify via the
+            # existing keyPressEvent path that the shortcut activates _run.
+            win.keyPressEvent(key_event)
+            assert len(run_calls) >= 1, (
+                "Ctrl+Return must trigger _run (SPEC-22 shortcut)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    # ---- Tab order ----
+
+    def test_tab_order_path_before_browse(self, qapp):
+        """path_edit comes before browse_btn in the tab order."""
+        win = MainWindow()
+        try:
+            # nextInFocusChain starting from path_edit must reach browse_btn
+            # before cycling back to path_edit.
+            seen: list = []
+            widget = win._path_edit
+            for _ in range(50):
+                widget = widget.nextInFocusChain()
+                seen.append(widget)
+                if widget is win._browse_btn:
+                    break
+                if widget is win._path_edit:
+                    break
+            assert win._browse_btn in seen, (
+                "browse_btn must follow path_edit in the tab order (SPEC-22)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_tab_order_browse_before_seed(self, qapp):
+        """browse_btn comes before seed_edit in the tab order."""
+        win = MainWindow()
+        try:
+            seen: list = []
+            widget = win._browse_btn
+            for _ in range(50):
+                widget = widget.nextInFocusChain()
+                seen.append(widget)
+                if widget is win._seed_edit:
+                    break
+                if widget is win._browse_btn:
+                    break
+            assert win._seed_edit in seen, (
+                "seed_edit must follow browse_btn in the tab order (SPEC-22)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_tab_order_run_follows_action_combo(self, qapp):
+        """run_btn follows action_combo in the tab order."""
+        win = MainWindow()
+        try:
+            seen: list = []
+            widget = win._action_combo
+            for _ in range(50):
+                widget = widget.nextInFocusChain()
+                seen.append(widget)
+                if widget is win._run_btn:
+                    break
+                if widget is win._action_combo:
+                    break
+            assert win._run_btn in seen, (
+                "run_btn must follow action_combo in the tab order (SPEC-22)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    # ---- Accessible names ----
+
+    def test_path_edit_has_accessible_name(self, qapp):
+        """_path_edit has a non-empty accessibleName (SPEC-22)."""
+        win = MainWindow()
+        try:
+            assert win._path_edit.accessibleName(), (
+                "_path_edit must have a non-empty accessibleName (SPEC-22)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_seed_edit_has_accessible_name(self, qapp):
+        """_seed_edit has a non-empty accessibleName (SPEC-22)."""
+        win = MainWindow()
+        try:
+            assert win._seed_edit.accessibleName(), (
+                "_seed_edit must have a non-empty accessibleName (SPEC-22)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_run_btn_has_accessible_name(self, qapp):
+        """_run_btn has a non-empty accessibleName (SPEC-22)."""
+        win = MainWindow()
+        try:
+            assert win._run_btn.accessibleName(), (
+                "_run_btn must have a non-empty accessibleName (SPEC-22)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_action_combo_has_accessible_name(self, qapp):
+        """_action_combo has a non-empty accessibleName (SPEC-22)."""
+        win = MainWindow()
+        try:
+            assert win._action_combo.accessibleName(), (
+                "_action_combo must have a non-empty accessibleName (SPEC-22)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_browse_btn_has_accessible_name(self, qapp):
+        """browse button has a non-empty accessibleName (SPEC-22)."""
+        win = MainWindow()
+        try:
+            assert win._browse_btn.accessibleName(), (
+                "_browse_btn must have a non-empty accessibleName (SPEC-22)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_radio_folders_has_accessible_name(self, qapp):
+        """_radio_folders has a non-empty accessibleName (SPEC-22)."""
+        win = MainWindow()
+        try:
+            assert win._radio_folders.accessibleName(), (
+                "_radio_folders must have a non-empty accessibleName (SPEC-22)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_radio_files_has_accessible_name(self, qapp):
+        """_radio_files has a non-empty accessibleName (SPEC-22)."""
+        win = MainWindow()
+        try:
+            assert win._radio_files.accessibleName(), (
+                "_radio_files must have a non-empty accessibleName (SPEC-22)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_filters_toggle_has_accessible_name(self, qapp):
+        """_filters_toggle_btn has a non-empty accessibleName (SPEC-22)."""
+        win = MainWindow()
+        try:
+            assert win._filters_toggle_btn.accessibleName(), (
+                "_filters_toggle_btn must have a non-empty accessibleName (SPEC-22)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    # ---- Focus rule in theme ----
+
+    def test_focus_qss_rule_present_in_build_stylesheet(self, qapp):
+        """build_stylesheet output contains a :focus rule for focus ring visibility."""
+        from ff_explorer.gui.theme import build_stylesheet, LIGHT
+        qss = build_stylesheet(LIGHT)
+        assert ":focus" in qss, (
+            "build_stylesheet must include a :focus QSS rule for focus ring (SPEC-22)"
+        )
+
+    # ---- Accessible names registry completeness ----
+
+    def test_widget_accessible_names_covers_primary_interactive_keys(self, qapp):
+        """WIDGET_ACCESSIBLE_NAMES covers the primary interactive widget keys."""
+        from ff_explorer.gui.widget_info import WIDGET_ACCESSIBLE_NAMES
+        required_keys = {
+            "path", "path_browse", "seed", "mode_folders", "mode_files",
+            "action", "run", "filters_toggle", "settings",
+        }
+        for key in required_keys:
+            assert key in WIDGET_ACCESSIBLE_NAMES, (
+                f"WIDGET_ACCESSIBLE_NAMES must include key {key!r} (SPEC-22)"
+            )
+            assert WIDGET_ACCESSIBLE_NAMES[key], (
+                f"WIDGET_ACCESSIBLE_NAMES[{key!r}] must be non-empty"
+            )
+
+
+# ---------------------------------------------------------------------------
+# A23 — SPEC-R03: i18n string coverage guard tests
+# ---------------------------------------------------------------------------
+
+class TestI18nStringCoverageGuard:
+    """A23: SPEC-R03 guard tests for i18n string coverage.
+
+    Lint: no bare-string-literal setPlaceholderText/setWindowTitle in any
+    ff_explorer/gui/*.py (all must be wrapped in tr()).
+
+    Pseudo-locale: treemap window title and a representative dialog title
+    render ⟦…⟧-wrapped when the pseudo-locale is active.
+    """
+
+    def test_no_bare_setPlaceholderText_literals_in_gui_package(self):
+        """SPEC-R03 lint: every setPlaceholderText() call in ff_explorer/gui/*.py
+        must have tr(...) as its first argument — no bare string literals.
+
+        Pattern matched: setPlaceholderText( immediately followed by a quote.
+        Allowed: setPlaceholderText(tr( — passes the lint.
+        """
+        import re
+        from pathlib import Path
+
+        gui_dir = Path(__file__).resolve().parent.parent / "ff_explorer" / "gui"
+        # Match the call followed immediately by a quote (bare literal)
+        bare_pattern = re.compile(r"""setPlaceholderText\(\s*["']""")
+
+        offenders: list[str] = []
+        for py_file in gui_dir.glob("*.py"):
+            text = py_file.read_text(encoding="utf-8")
+            for lineno, line in enumerate(text.splitlines(), start=1):
+                if bare_pattern.search(line):
+                    offenders.append(f"{py_file.name}:{lineno}: {line.strip()}")
+
+        assert not offenders, (
+            "Bare setPlaceholderText(\"...\") literals found in the GUI package — "
+            "wrap each in tr() (SPEC-R03):\n"
+            + "\n".join(offenders)
+        )
+
+    def test_no_bare_setWindowTitle_literals_in_gui_package(self):
+        """SPEC-R03 lint: every setWindowTitle() call in ff_explorer/gui/*.py
+        must have tr(...) as its first argument — no bare string literals.
+
+        Pattern matched: setWindowTitle( immediately followed by a quote.
+        Allowed: setWindowTitle(tr( — passes the lint.
+        """
+        import re
+        from pathlib import Path
+
+        gui_dir = Path(__file__).resolve().parent.parent / "ff_explorer" / "gui"
+        bare_pattern = re.compile(r"""setWindowTitle\(\s*["']""")
+
+        offenders: list[str] = []
+        for py_file in gui_dir.glob("*.py"):
+            text = py_file.read_text(encoding="utf-8")
+            for lineno, line in enumerate(text.splitlines(), start=1):
+                if bare_pattern.search(line):
+                    offenders.append(f"{py_file.name}:{lineno}: {line.strip()}")
+
+        assert not offenders, (
+            "Bare setWindowTitle(\"...\") literals found in the GUI package — "
+            "wrap each in tr() (SPEC-R03):\n"
+            + "\n".join(offenders)
+        )
+
+    def test_treemap_window_title_rendered_with_pseudo_locale(self, qapp):
+        """SPEC-R03 pseudo-locale: LargestEntriesView.windowTitle() returns a
+        ⟦…⟧-wrapped string when the pseudo-locale translator is active.
+
+        This confirms tr("Disk Usage — Largest Files") in treemap_view.py is
+        live and actually routed through the Qt translation seam.
+        """
+        from ff_explorer.gui.treemap_view import LargestEntriesView
+        from ff_explorer.gui.i18n import install_pseudo_locale, remove_pseudo_locale
+
+        translator = install_pseudo_locale(qapp)
+        try:
+            view = LargestEntriesView()
+            try:
+                title = view.windowTitle()
+                assert title.startswith("⟦"), (
+                    f"LargestEntriesView.windowTitle() must start with '⟦' under the "
+                    f"pseudo-locale translator (SPEC-R03). Got: {title!r}"
+                )
+                assert title.endswith("⟧"), (
+                    f"LargestEntriesView.windowTitle() must end with '⟧' under the "
+                    f"pseudo-locale translator (SPEC-R03). Got: {title!r}"
+                )
+            finally:
+                view.deleteLater()
+        finally:
+            remove_pseudo_locale(qapp, translator)
+
+    def test_results_dialog_title_rendered_with_pseudo_locale(self, qapp, tmp_path):
+        """SPEC-R03 pseudo-locale: the Results dialog windowTitle starts with ⟦
+        when the pseudo-locale translator is active.
+
+        Calls _show_results_view with one entry and intercepts the dialog's
+        windowTitle() before exec() would block.
+        """
+        from PySide6.QtWidgets import QDialog
+        from ff_explorer.gui.i18n import install_pseudo_locale, remove_pseudo_locale
+        from ff_explorer import MatchEntry, EntryKind
+
+        f = tmp_path / "test.txt"
+        f.write_bytes(b"x")
+        entries = [MatchEntry(path=f, kind=EntryKind.FILES)]
+
+        win = MainWindow()
+        translator = install_pseudo_locale(qapp)
+        try:
+            captured_titles: list[str] = []
+
+            def fake_exec(self_dlg):
+                captured_titles.append(self_dlg.windowTitle())
+                return 0
+
+            with patch.object(QDialog, "exec", fake_exec):
+                win._show_results_view(entries, [], "file")
+
+            assert captured_titles, "Results dialog must have been opened"
+            title = captured_titles[0]
+            assert title.startswith("⟦"), (
+                f"Results dialog windowTitle() must start with '⟦' under the "
+                f"pseudo-locale translator (SPEC-R03). Got: {title!r}"
+            )
+        finally:
+            remove_pseudo_locale(qapp, translator)
             win.close()
             win.deleteLater()

@@ -20,6 +20,12 @@ AST. False positives are intentional (fail-closed on the safety surface); narrow
 it through access-dev/core-dev with the reviewer if the block is wrong.
 
 Non-fatal on its own errors (exit 0). Block protocol: exit 2 + reason on stderr.
+
+## Principles Applied
+P2 Full Determinism, P8 Principles Inheritance, P11 Programmatic Determinism (hook IS the harness).
+Custom R-1 Data-Loss Safety: Remove/Compress are destructive (CLAUDE.md invariant 2); this hook is
+fail-closed on any pattern that visibly weakens the recycle-bin route, dry_run/confirm gate, or
+non-empty-seed rejection.
 """
 from __future__ import annotations
 

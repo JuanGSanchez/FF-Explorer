@@ -13,7 +13,8 @@ Pure query (no side effects):
                  extensions=None,
                  respect_ignore=False, ignore_globs=None,
                  search_archives=False,
-                 content_query=None, content_max_bytes=CONTENT_MAX_BYTES) -> list[MatchEntry]
+                 content_query=None, content_max_bytes=CONTENT_MAX_BYTES,
+                 include_hidden=True) -> list[MatchEntry]
     entry_metadata(path) -> dict
     largest_entries(path, top_n=50, *, name_seed="") -> list[SizedEntry]
     find_duplicates(path, *, min_size=0, algo="sha256") -> list[DuplicateGroup]
@@ -26,6 +27,10 @@ Guarded destructive operations:
                      dry_run=True, confirm=False) -> CompressionReport
     rename_entries(path, kind, name_seed, *, rules=None, case_sensitive=True,
                    match_mode="substring", dry_run=True, confirm=False) -> RenameReport
+    copy_entries(path, kind, name_seed, *, destination, case_sensitive=True,
+                 match_mode="substring", dry_run=True, confirm=False) -> TransferReport
+    move_entries(path, kind, name_seed, *, destination, case_sensitive=True,
+                 match_mode="substring", dry_run=True, confirm=False) -> TransferReport
 
 Typed errors:
     FFExplorerError          — base class for all structured errors from this module
@@ -74,18 +79,24 @@ match_mode parameter:
 from __future__ import annotations
 
 import fnmatch
+import logging
 import os
 import re
 import shutil
+import stat as _stat_module
 import tarfile
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import IntEnum
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Iterable, Iterator, Sequence
 
 import pathspec  # gitwildmatch ignore-file support (FFX-I04; hard dep)
+
+# SPEC-11: structured logging. Module-level logger; the package __init__ attaches
+# a NullHandler so library consumers that never configure logging see no noise.
+logger = logging.getLogger(__name__)
 
 from ff_explorer.content_search import (  # FFX-I09
     CONTENT_MAX_BYTES,
@@ -97,6 +108,74 @@ try:
     _SEND2TRASH_AVAILABLE = True
 except ImportError:  # pragma: no cover — send2trash not installed
     _SEND2TRASH_AVAILABLE = False
+
+
+# ---------------------------------------------------------------------------
+# Logging configuration (SPEC-11)
+# ---------------------------------------------------------------------------
+
+def configure_logging(
+    level: int | str | None = None,
+    *,
+    stream=None,
+) -> logging.Logger:
+    """Configure the ``ff_explorer`` package logger (SPEC-11).
+
+    This is an opt-in convenience for applications/CLIs that want FF Explorer's
+    structured log records surfaced.  Libraries should NOT call it; the package
+    already carries a ``NullHandler`` so it is silent by default.
+
+    Parameters
+    ----------
+    level:
+        Logging level as an int (e.g. ``logging.DEBUG``) or a case-insensitive
+        name (``"DEBUG"``, ``"warning"``).  When ``None``, the level is read
+        from the ``FF_EXPLORER_LOG_LEVEL`` environment variable, defaulting to
+        ``WARNING`` when that is unset.
+    stream:
+        Optional stream for the ``StreamHandler``.  When ``None``, ``stderr`` is
+        used.  Additionally, if the ``FF_EXPLORER_LOG_FILE`` environment
+        variable is set, a ``FileHandler`` writing to that path is attached.
+
+    Returns
+    -------
+    logging.Logger
+        The configured ``ff_explorer`` package logger.
+
+    Raises
+    ------
+    ValueError
+        When *level* is an unknown level name.
+    """
+    if level is None:
+        level = os.environ.get("FF_EXPLORER_LOG_LEVEL", "WARNING")
+
+    if isinstance(level, str):
+        resolved = logging.getLevelName(level.upper())
+        if not isinstance(resolved, int):
+            raise ValueError(f"Unknown logging level name: {level!r}")
+        level_value = resolved
+    else:
+        level_value = int(level)
+
+    pkg_logger = logging.getLogger("ff_explorer")
+    pkg_logger.setLevel(level_value)
+
+    formatter = logging.Formatter(
+        "%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
+
+    stream_handler = logging.StreamHandler(stream)
+    stream_handler.setFormatter(formatter)
+    pkg_logger.addHandler(stream_handler)
+
+    log_file = os.environ.get("FF_EXPLORER_LOG_FILE")
+    if log_file:
+        file_handler = logging.FileHandler(log_file, encoding="utf-8")
+        file_handler.setFormatter(formatter)
+        pkg_logger.addHandler(file_handler)
+
+    return pkg_logger
 
 
 # ---------------------------------------------------------------------------
@@ -122,6 +201,45 @@ class MatchEntry:
     # Convenience — stringifies to the absolute path for easy display/serialisation
     def __str__(self) -> str:
         return str(self.path)
+
+
+@dataclass(frozen=True)
+class SkippedEntry:
+    """An entry that was skipped during a walk due to a recoverable error.
+
+    Produced by :func:`iter_entries` (via the ``_skipped`` parameter) and
+    surfaced to callers through :func:`list_entries_with_report`.
+
+    Attributes
+    ----------
+    path:
+        String representation of the path that could not be accessed.
+    reason:
+        Human-readable description of why the entry was skipped (e.g.
+        ``"PermissionError: [Errno 13] Permission denied: '/secret'"``).
+    """
+    path: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class ListingResult:
+    """Return value of :func:`list_entries_with_report`.
+
+    Bundles the matched entries with a (possibly empty) list of entries that
+    were skipped due to recoverable errors encountered during the walk.
+
+    Attributes
+    ----------
+    entries:
+        Matched entries — identical to what :func:`list_entries` would return
+        with the same arguments on a fully readable tree.
+    skipped:
+        Entries that could not be accessed.  Empty list when the walk
+        encountered no errors.
+    """
+    entries: list[MatchEntry]
+    skipped: list[SkippedEntry]
 
 
 @dataclass(frozen=True)
@@ -160,6 +278,38 @@ class CompressionReport:
     @property
     def would_affect(self) -> list[Path]:
         """Paths that would be / were compressed (preview list)."""
+        return self.matched
+
+
+@dataclass
+class TransferReport:
+    """Returned by copy_entries and move_entries regardless of dry_run state.
+
+    Attributes
+    ----------
+    kind:
+        ``"copy"`` or ``"move"`` — discriminates which operation produced the report.
+    matched:
+        All paths that matched the filter (source side).
+    transferred:
+        Paths successfully copied/moved (empty on dry_run).
+    failed:
+        ``[(source_path, error_message), ...]`` for any per-item failure.
+    dry_run:
+        Mirrors the *dry_run* parameter.
+    destination:
+        The destination directory used (str), or ``None`` on dry_run.
+    """
+    kind: str = "copy"
+    matched: list[Path] = field(default_factory=list)
+    transferred: list[Path] = field(default_factory=list)
+    failed: list[tuple[Path, str]] = field(default_factory=list)
+    dry_run: bool = True
+    destination: str | None = None
+
+    @property
+    def would_affect(self) -> list[Path]:
+        """Paths that would be / were targeted (preview list)."""
         return self.matched
 
 
@@ -402,6 +552,75 @@ def _guard_destructive_seed(name_seed: str, operation: str) -> None:
         raise EmptySeedError(operation)
 
 
+def _apply_only_paths(
+    matched_paths: list[Path],
+    only_paths: Iterable[str] | None,
+) -> list[Path]:
+    """Intersect *matched_paths* with *only_paths*, if provided.
+
+    Safety property: *only_paths* can only **narrow** the set — it cannot
+    introduce paths that were not already in the seed-matched set.  A path in
+    *only_paths* that is absent from *matched_paths* is silently ignored.
+
+    Parameters
+    ----------
+    matched_paths:
+        The full seed-matched path list produced by list_entries.
+    only_paths:
+        An optional iterable of absolute-path strings (the GUI-selected subset).
+        ``None`` means "act on the full matched set" — exact pre-change
+        behaviour.
+
+    Returns
+    -------
+    list[Path]
+        The (possibly narrowed) list to act on.  Order follows *matched_paths*.
+    """
+    if only_paths is None:
+        return matched_paths
+    # Normalise only_paths to a frozenset of resolved Path objects so that
+    # separator / case differences on Windows are handled by pathlib.
+    only_resolved: frozenset[Path] = frozenset(
+        Path(p).resolve() for p in only_paths
+    )
+    return [p for p in matched_paths if p.resolve() in only_resolved]
+
+
+def _is_hidden_entry(name: str, entry_path: Path) -> bool:
+    """Return True when *entry_path* is hidden or system (SPEC-17).
+
+    Cross-platform:
+    - POSIX hidden: name starts with a dot (``.``).
+    - Windows hidden/system: ``stat().st_file_attributes`` carries the
+      ``FILE_ATTRIBUTE_HIDDEN`` (0x02) or ``FILE_ATTRIBUTE_SYSTEM`` (0x04)
+      flags.  The attribute is only present on Windows (``os.stat_result``
+      does not carry it on POSIX); guarded with ``hasattr``.
+    - On Windows, dotfile convention is also honoured in addition to the
+      attribute check.
+
+    A stat() call is made only when the platform provides
+    ``st_file_attributes`` (i.e. on Windows); on POSIX only the name is
+    inspected — no extra syscall.
+
+    OSError on stat is silently ignored (treated as not-hidden so the entry
+    is included, consistent with the rest of the walk's error handling).
+    """
+    # Dotfile check applies everywhere (POSIX canonical, also useful on Windows)
+    if name.startswith("."):
+        return True
+    # Windows attribute check (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)
+    try:
+        st = entry_path.stat()
+        if hasattr(st, "st_file_attributes"):
+            _HIDDEN = _stat_module.FILE_ATTRIBUTE_HIDDEN   # 0x02
+            _SYSTEM = _stat_module.FILE_ATTRIBUTE_SYSTEM   # 0x04
+            if st.st_file_attributes & (_HIDDEN | _SYSTEM):
+                return True
+    except OSError:
+        pass
+    return False
+
+
 # _IGNORE_FILE_NAMES — filenames whose contents are treated as gitwildmatch
 # ignore patterns during a respect_ignore walk (FFX-I04).
 _IGNORE_FILE_NAMES: tuple[str, ...] = (".gitignore", ".ignore")
@@ -456,7 +675,8 @@ def _build_ignore_spec(
             candidate = directory / fname
             try:
                 text = candidate.read_text(encoding="utf-8", errors="replace")
-            except OSError:
+            except OSError as exc:
+                logger.debug("Skipping unreadable ignore file %s: %s", candidate, exc)
                 continue
             for line in text.splitlines():
                 stripped = line.strip()
@@ -577,9 +797,9 @@ def _enumerate_archive_members(
 
         # .gz suffix without .tar stem = plain gzip blob; no member enumeration.
 
-    except (zipfile.BadZipFile, tarfile.TarError, OSError, EOFError):
+    except (zipfile.BadZipFile, tarfile.TarError, OSError, EOFError) as exc:
         # Malformed / truncated / unreadable archive — skip gracefully.
-        pass
+        logger.warning("Skipping unreadable archive %s: %s", archive_path, exc)
 
     return results
 
@@ -587,6 +807,313 @@ def _enumerate_archive_members(
 # ---------------------------------------------------------------------------
 # Pure query operations  (NO side effects)
 # ---------------------------------------------------------------------------
+
+def iter_entries(
+    path: str | Path,
+    kind: EntryKind | int,
+    name_seed: str = "",
+    *,
+    case_sensitive: bool = True,
+    match_mode: str = "substring",
+    min_size: int | None = None,
+    max_size: int | None = None,
+    modified_after: float | None = None,
+    modified_before: float | None = None,
+    extensions: Iterable[str] | None = None,
+    respect_ignore: bool = False,
+    ignore_globs: list[str] | None = None,
+    search_archives: bool = False,
+    content_query: str | None = None,
+    content_max_bytes: int = CONTENT_MAX_BYTES,
+    include_hidden: bool = True,
+    _skipped: "list[SkippedEntry] | None" = None,
+) -> Iterator[MatchEntry]:
+    """Generator variant of :func:`list_entries` — yields each :class:`MatchEntry`
+    as the walk discovers it without accumulating a full results list internally.
+
+    The streaming guarantee applies specifically to the live-walk path: entries
+    are ``yield``-ed one by one as ``os.walk`` progresses.  The index fast-path
+    and archive enumeration yield from their (inherently list-based) results.
+
+    Parameters
+    ----------
+    path, kind, name_seed, case_sensitive, match_mode, min_size, max_size,
+    modified_after, modified_before, extensions, respect_ignore, ignore_globs,
+    search_archives, content_query, content_max_bytes:
+        Identical semantics to :func:`list_entries`.
+    include_hidden:
+        When ``True`` (default), hidden and system entries are included in
+        results — identical to pre-SPEC-17 behaviour.  When ``False``,
+        hidden/system entries are excluded.  Cross-platform:
+
+        - POSIX: names starting with ``.`` are hidden.
+        - Windows: entries whose ``st_file_attributes`` carries
+          ``FILE_ATTRIBUTE_HIDDEN`` (0x02) or ``FILE_ATTRIBUTE_SYSTEM`` (0x04)
+          are excluded; dotfiles are also excluded.
+
+        Default ``True`` — no regression vs. existing callers.
+    _skipped:
+        Optional list to collect :class:`SkippedEntry` objects for every path
+        that could not be accessed due to a recoverable error (e.g.
+        ``PermissionError``).  When ``None`` (default), errors are only
+        logged.  Pass an empty list to collect them; the list is mutated
+        in-place.  The walk always completes — errors never abort traversal.
+
+    Yields
+    ------
+    MatchEntry
+        One per matching entry, in ``os.walk`` top-down order.
+
+    Raises
+    ------
+    ValueError
+        If *path* does not exist or is not a directory, or *match_mode* is
+        not recognised.
+    InvalidRegexError
+        If *match_mode* is ``"regex"`` and *name_seed* is not a valid pattern.
+    ContentSearchUngatedError
+        If *content_query* is provided without any name/type/size pre-filter.
+    """
+    root_path = _normalise_path(path)
+    kind = EntryKind(int(kind))
+
+    # Compile matcher once (raises InvalidRegexError early for bad regex)
+    compiled_pattern, _ = _build_matcher(name_seed, match_mode, case_sensitive)
+
+    # Normalise extension set once
+    ext_set = _normalise_extensions(extensions)
+
+    # FFX-I09: content_query gate — at least one name/type/size pre-filter must
+    # be active.  An ungated content search would scan every file in the tree.
+    if content_query is not None:
+        _has_prefilter = (
+            bool(name_seed)           # non-empty name seed
+            or ext_set is not None    # extension filter
+            or min_size is not None   # size lower bound
+            or max_size is not None   # size upper bound
+            or modified_after is not None   # date lower bound
+            or modified_before is not None  # date upper bound
+        )
+        if not _has_prefilter:
+            raise ContentSearchUngatedError()
+
+        # Compile the content regex separately from the name regex.
+        # compiled_pattern applies to *name_seed* — content_query is a
+        # different string and needs its own pattern object.
+        if match_mode == "regex":
+            flags = 0 if case_sensitive else re.IGNORECASE
+            try:
+                _content_compiled: "re.Pattern[str] | None" = re.compile(
+                    content_query, flags
+                )
+            except re.error as exc:
+                raise InvalidRegexError(content_query, exc) from exc
+        else:
+            _content_compiled = None
+    else:
+        _content_compiled = None
+
+    # Determine whether any structured filter is active to avoid stat() overhead
+    # when no filters are requested (hot path: exact legacy behaviour).
+    # SPEC-17: include_hidden=False requires a stat() call on Windows to check
+    # st_file_attributes; on POSIX only the name is checked (no stat needed).
+    # We conservatively set needs_stat=True when include_hidden=False so that
+    # the Windows attribute check path is available; _is_hidden_entry guards
+    # itself with hasattr so POSIX incurs no extra syscall.
+    needs_stat = (
+        min_size is not None
+        or max_size is not None
+        or modified_after is not None
+        or modified_before is not None
+        or ext_set is not None
+        or not include_hidden  # SPEC-17: may need st_file_attributes on Windows
+    )
+
+    # Ignore-awareness is active when either flag is set (FFX-I04).
+    use_ignore = respect_ignore or bool(ignore_globs)
+
+    # FFX-I10: index routing — serve from the in-memory name index when:
+    #   • the root has an active index (opt-in per root)
+    #   • no advanced filter is active that the index does not model
+    #     (size/date/extension/content/archive/ignore)
+    # Any active advanced filter falls back to the live walk for correctness.
+    # _skipped is also a signal to use the live walk (index path does not
+    # model per-entry access errors).
+    # SPEC-17: include_hidden=False bypasses the index (index does not model
+    # hidden/system attribute).
+    _use_index = (
+        not needs_stat
+        and not use_ignore
+        and not search_archives
+        and content_query is None
+        and _skipped is None
+        and include_hidden  # SPEC-17: index does not filter hidden entries
+    )
+    if _use_index:
+        # Lazy import — keeps the rest of core.py importable without index.py
+        # being available, and avoids a circular import at module load time.
+        try:
+            from ff_explorer.index import IndexManager as _IndexManager  # noqa: PLC0415
+            _idx = _IndexManager.get_index(root_path)
+        except Exception:  # pragma: no cover — import failure is non-fatal
+            _idx = None
+
+        if _idx is not None:
+            # Route query to the index.
+            matched_paths = _idx.query(
+                name_seed,
+                case_sensitive=case_sensitive,
+                match_mode=match_mode,
+            )
+            # Filter by kind: the index holds both files and dirs; stat each to
+            # determine type.  Paths that no longer exist are silently dropped.
+            for p in matched_paths:
+                try:
+                    is_dir = p.is_dir()
+                except OSError:  # pragma: no cover
+                    continue
+                if kind == EntryKind.FOLDERS and is_dir:
+                    yield MatchEntry(path=p, kind=EntryKind.FOLDERS)
+                elif kind == EntryKind.FILES and not is_dir:
+                    yield MatchEntry(path=p, kind=EntryKind.FILES)
+            return
+
+    # SPEC-15: onerror callback — capture permission errors entering a subdir
+    # into _skipped (when provided) instead of silently swallowing them.
+    # The walk always completes; errors never abort traversal.
+    def _onerror(exc: OSError) -> None:
+        reason = f"{type(exc).__name__}: {exc}"
+        logger.warning("Walk error (skipped): %s", reason)
+        if _skipped is not None:
+            _skipped.append(SkippedEntry(str(exc.filename) if exc.filename else "", reason))
+
+    # Per-directory spec cache: maps absolute dirpath -> PathSpec|None.
+    # Built lazily as os.walk descends; the root entry is seeded before the
+    # loop so the root's own ignore file is honoured for its direct children.
+    dir_specs: dict[Path, "pathspec.PathSpec | None"] = {}
+
+    if use_ignore:
+        # Seed the root: any root-level .gitignore/.ignore + caller extra globs.
+        # read_files=respect_ignore: only read disk files when the flag is on.
+        dir_specs[root_path] = _build_ignore_spec(
+            root_path, None, ignore_globs, read_files=respect_ignore
+        )
+
+    for dirpath, dirnames, filenames in os.walk(root_path, onerror=_onerror):
+        current = Path(dirpath)
+
+        if use_ignore:
+            # Retrieve the inherited spec for *current* (set by parent iteration
+            # or seeded for root above).
+            current_spec = dir_specs.get(current)
+
+            # Prune ignored subdirectories IN-PLACE so os.walk never descends.
+            # Also pre-compute each surviving child's spec for the next level.
+            surviving_dirs: list[str] = []
+            for dname in dirnames:
+                child = current / dname
+                if _is_ignored(child, current_spec, root_path, is_dir=True):
+                    continue  # prune — do not descend
+                surviving_dirs.append(dname)
+                # Build the child's own spec (inherits current + child's own
+                # ignore files).  Store it so the next iteration can retrieve it.
+                # read_files=respect_ignore: only read disk files when the flag is on.
+                dir_specs[child] = _build_ignore_spec(
+                    child, current_spec, ignore_globs, read_files=respect_ignore
+                )
+            # Mutate dirnames in-place: os.walk only descends into what remains.
+            dirnames[:] = surviving_dirs
+
+            # Filter filenames by ignore spec.
+            filenames = [
+                f for f in filenames
+                if not _is_ignored(current / f, current_spec, root_path)
+            ]
+
+        if kind == EntryKind.FOLDERS:
+            for name in dirnames:
+                if not _matches(name, name_seed, case_sensitive,
+                                match_mode, compiled_pattern):
+                    continue
+                entry_path = current / name
+                # SPEC-17: hidden/system exclusion (fast dotfile check first,
+                # then Windows attribute check inside _is_hidden_entry).
+                if not include_hidden and _is_hidden_entry(name, entry_path):
+                    continue
+                if needs_stat:
+                    try:
+                        stat = entry_path.stat()
+                    except OSError as exc:
+                        reason = f"{type(exc).__name__}: {exc}"
+                        logger.debug("Skipping unreadable folder %s: %s", entry_path, exc)
+                        if _skipped is not None:
+                            _skipped.append(SkippedEntry(str(entry_path), reason))
+                        continue
+                    if not _passes_filters(
+                        entry_path, False, stat,
+                        min_size, max_size,
+                        modified_after, modified_before,
+                        ext_set,
+                    ):
+                        continue
+                yield MatchEntry(path=entry_path, kind=EntryKind.FOLDERS)
+        else:
+            for name in filenames:
+                if not _matches(name, name_seed, case_sensitive,
+                                match_mode, compiled_pattern):
+                    continue
+                entry_path = current / name
+                # SPEC-17: hidden/system exclusion (fast dotfile check first,
+                # then Windows attribute check inside _is_hidden_entry).
+                if not include_hidden and _is_hidden_entry(name, entry_path):
+                    continue
+                if needs_stat:
+                    try:
+                        stat = entry_path.stat()
+                    except OSError as exc:
+                        reason = f"{type(exc).__name__}: {exc}"
+                        logger.debug("Skipping unreadable file %s: %s", entry_path, exc)
+                        if _skipped is not None:
+                            _skipped.append(SkippedEntry(str(entry_path), reason))
+                        continue
+                    if not _passes_filters(
+                        entry_path, True, stat,
+                        min_size, max_size,
+                        modified_after, modified_before,
+                        ext_set,
+                    ):
+                        continue
+                # FFX-I09: content filter (files only; directories never excluded)
+                if content_query is not None:
+                    if not _file_content_matches(
+                        entry_path,
+                        content_query,
+                        match_mode,
+                        case_sensitive,
+                        content_max_bytes,
+                        _compiled=_content_compiled,
+                    ):
+                        continue
+                yield MatchEntry(path=entry_path, kind=EntryKind.FILES)
+
+            # FFX-I05: archive transparency — enumerate members of any archive
+            # file found in the current directory when search_archives is True.
+            # This is independent of whether the archive's own name matched;
+            # we inspect every archive in *filenames* (post-ignore-filter).
+            if search_archives:
+                for name in filenames:
+                    entry_path = current / name
+                    if entry_path.suffix.lower() not in _ARCHIVE_EXTENSIONS:
+                        continue
+                    for member_entry in _enumerate_archive_members(
+                        entry_path,
+                        name_seed,
+                        case_sensitive,
+                        match_mode,
+                        compiled_pattern,
+                    ):
+                        yield member_entry
+
 
 def list_entries(
     path: str | Path,
@@ -605,11 +1132,16 @@ def list_entries(
     search_archives: bool = False,
     content_query: str | None = None,
     content_max_bytes: int = CONTENT_MAX_BYTES,
+    include_hidden: bool = True,
 ) -> list[MatchEntry]:
     """
     Traverse *path* recursively and return every entry whose name matches
     *name_seed* under the requested *match_mode*, further narrowed by the
     optional structured filters.
+
+    This is a convenience wrapper around :func:`iter_entries` that collects
+    all results into a list.  Signature and return value are byte-for-byte
+    identical to the pre-SPEC-14 implementation.
 
     Parameters
     ----------
@@ -693,6 +1225,12 @@ def list_entries(
         larger than this cap are silently skipped (treated as no-match).
         Default :data:`ff_explorer.content_search.CONTENT_MAX_BYTES` (10 MiB).
         Ignored when *content_query* is ``None``.
+    include_hidden:
+        When ``True`` (default), hidden and system entries are included —
+        identical to pre-SPEC-17 behaviour, no regression.  When ``False``,
+        hidden/system entries are excluded.  Cross-platform: POSIX dotfiles
+        (names starting with ``.``) and Windows ``FILE_ATTRIBUTE_HIDDEN`` /
+        ``FILE_ATTRIBUTE_SYSTEM`` entries are excluded.  Default ``True``.
 
     Returns
     -------
@@ -713,214 +1251,99 @@ def list_entries(
         If *content_query* is provided but no name/type/size pre-filter is
         active.  (Also a subtype of ``ValueError``.)
     """
-    root_path = _normalise_path(path)
-    kind = EntryKind(int(kind))
+    return list(iter_entries(
+        path,
+        kind,
+        name_seed,
+        case_sensitive=case_sensitive,
+        match_mode=match_mode,
+        min_size=min_size,
+        max_size=max_size,
+        modified_after=modified_after,
+        modified_before=modified_before,
+        extensions=extensions,
+        respect_ignore=respect_ignore,
+        ignore_globs=ignore_globs,
+        search_archives=search_archives,
+        content_query=content_query,
+        content_max_bytes=content_max_bytes,
+        include_hidden=include_hidden,
+        _skipped=None,
+    ))
 
-    # Compile matcher once (raises InvalidRegexError early for bad regex)
-    compiled_pattern, _ = _build_matcher(name_seed, match_mode, case_sensitive)
 
-    # Normalise extension set once
-    ext_set = _normalise_extensions(extensions)
+def list_entries_with_report(
+    path: str | Path,
+    kind: EntryKind | int,
+    name_seed: str = "",
+    *,
+    case_sensitive: bool = True,
+    match_mode: str = "substring",
+    min_size: int | None = None,
+    max_size: int | None = None,
+    modified_after: float | None = None,
+    modified_before: float | None = None,
+    extensions: Iterable[str] | None = None,
+    respect_ignore: bool = False,
+    ignore_globs: list[str] | None = None,
+    search_archives: bool = False,
+    content_query: str | None = None,
+    content_max_bytes: int = CONTENT_MAX_BYTES,
+    include_hidden: bool = True,
+) -> ListingResult:
+    """Walk *path* and return matched entries together with a skip report.
 
-    # FFX-I09: content_query gate — at least one name/type/size pre-filter must
-    # be active.  An ungated content search would scan every file in the tree.
-    if content_query is not None:
-        _has_prefilter = (
-            bool(name_seed)           # non-empty name seed
-            or ext_set is not None    # extension filter
-            or min_size is not None   # size lower bound
-            or max_size is not None   # size upper bound
-            or modified_after is not None   # date lower bound
-            or modified_before is not None  # date upper bound
-        )
-        if not _has_prefilter:
-            raise ContentSearchUngatedError()
+    Identical to :func:`list_entries` in every respect **except** that it
+    also collects paths that could not be accessed into a
+    :class:`SkippedEntry` list, bundled with the results in a
+    :class:`ListingResult`.  The walk always completes — recoverable errors
+    (``PermissionError``, ``OSError`` on stat) never abort traversal.
 
-        # Compile the content regex separately from the name regex.
-        # compiled_pattern applies to *name_seed* — content_query is a
-        # different string and needs its own pattern object.
-        if match_mode == "regex":
-            flags = 0 if case_sensitive else re.IGNORECASE
-            try:
-                _content_compiled: "re.Pattern[str] | None" = re.compile(
-                    content_query, flags
-                )
-            except re.error as exc:
-                raise InvalidRegexError(content_query, exc) from exc
-        else:
-            _content_compiled = None
-    else:
-        _content_compiled = None
+    Parameters
+    ----------
+    path, kind, name_seed, case_sensitive, match_mode, min_size, max_size,
+    modified_after, modified_before, extensions, respect_ignore, ignore_globs,
+    search_archives, content_query, content_max_bytes:
+        Same semantics as :func:`list_entries`.
+    include_hidden:
+        Same semantics as :func:`list_entries`.  Default ``True`` — no
+        regression vs. existing callers.
 
-    # Determine whether any structured filter is active to avoid stat() overhead
-    # when no filters are requested (hot path: exact legacy behaviour).
-    needs_stat = (
-        min_size is not None
-        or max_size is not None
-        or modified_after is not None
-        or modified_before is not None
-        or ext_set is not None
-    )
+    Returns
+    -------
+    ListingResult
+        ``.entries`` — list of matched :class:`MatchEntry` objects (same set
+        as :func:`list_entries` would return on a fully readable tree).
+        ``.skipped`` — list of :class:`SkippedEntry` objects for every path
+        that was skipped due to a recoverable error.  Empty when the walk
+        encountered no errors.
 
-    # Ignore-awareness is active when either flag is set (FFX-I04).
-    use_ignore = respect_ignore or bool(ignore_globs)
-
-    # FFX-I10: index routing — serve from the in-memory name index when:
-    #   • the root has an active index (opt-in per root)
-    #   • no advanced filter is active that the index does not model
-    #     (size/date/extension/content/archive/ignore)
-    # Any active advanced filter falls back to the live walk for correctness.
-    _use_index = (
-        not needs_stat
-        and not use_ignore
-        and not search_archives
-        and content_query is None
-    )
-    if _use_index:
-        # Lazy import — keeps the rest of core.py importable without index.py
-        # being available, and avoids a circular import at module load time.
-        try:
-            from ff_explorer.index import IndexManager as _IndexManager  # noqa: PLC0415
-            _idx = _IndexManager.get_index(root_path)
-        except Exception:  # pragma: no cover — import failure is non-fatal
-            _idx = None
-
-        if _idx is not None:
-            # Route query to the index.
-            matched_paths = _idx.query(
-                name_seed,
-                case_sensitive=case_sensitive,
-                match_mode=match_mode,
-            )
-            # Filter by kind: the index holds both files and dirs; stat each to
-            # determine type.  Paths that no longer exist are silently dropped.
-            index_results: list[MatchEntry] = []
-            for p in matched_paths:
-                try:
-                    is_dir = p.is_dir()
-                except OSError:  # pragma: no cover
-                    continue
-                if kind == EntryKind.FOLDERS and is_dir:
-                    index_results.append(MatchEntry(path=p, kind=EntryKind.FOLDERS))
-                elif kind == EntryKind.FILES and not is_dir:
-                    index_results.append(MatchEntry(path=p, kind=EntryKind.FILES))
-            return index_results
-
-    results: list[MatchEntry] = []
-
-    # Per-directory spec cache: maps absolute dirpath -> PathSpec|None.
-    # Built lazily as os.walk descends; the root entry is seeded before the
-    # loop so the root's own ignore file is honoured for its direct children.
-    dir_specs: dict[Path, "pathspec.PathSpec | None"] = {}
-
-    if use_ignore:
-        # Seed the root: any root-level .gitignore/.ignore + caller extra globs.
-        # read_files=respect_ignore: only read disk files when the flag is on.
-        dir_specs[root_path] = _build_ignore_spec(
-            root_path, None, ignore_globs, read_files=respect_ignore
-        )
-
-    for dirpath, dirnames, filenames in os.walk(root_path):
-        current = Path(dirpath)
-
-        if use_ignore:
-            # Retrieve the inherited spec for *current* (set by parent iteration
-            # or seeded for root above).
-            current_spec = dir_specs.get(current)
-
-            # Prune ignored subdirectories IN-PLACE so os.walk never descends.
-            # Also pre-compute each surviving child's spec for the next level.
-            surviving_dirs: list[str] = []
-            for dname in dirnames:
-                child = current / dname
-                if _is_ignored(child, current_spec, root_path, is_dir=True):
-                    continue  # prune — do not descend
-                surviving_dirs.append(dname)
-                # Build the child's own spec (inherits current + child's own
-                # ignore files).  Store it so the next iteration can retrieve it.
-                # read_files=respect_ignore: only read disk files when the flag is on.
-                dir_specs[child] = _build_ignore_spec(
-                    child, current_spec, ignore_globs, read_files=respect_ignore
-                )
-            # Mutate dirnames in-place: os.walk only descends into what remains.
-            dirnames[:] = surviving_dirs
-
-            # Filter filenames by ignore spec.
-            filenames = [
-                f for f in filenames
-                if not _is_ignored(current / f, current_spec, root_path)
-            ]
-
-        if kind == EntryKind.FOLDERS:
-            for name in dirnames:
-                if not _matches(name, name_seed, case_sensitive,
-                                match_mode, compiled_pattern):
-                    continue
-                entry_path = current / name
-                if needs_stat:
-                    try:
-                        stat = entry_path.stat()
-                    except OSError:
-                        continue
-                    if not _passes_filters(
-                        entry_path, False, stat,
-                        min_size, max_size,
-                        modified_after, modified_before,
-                        ext_set,
-                    ):
-                        continue
-                results.append(MatchEntry(path=entry_path, kind=EntryKind.FOLDERS))
-        else:
-            for name in filenames:
-                if not _matches(name, name_seed, case_sensitive,
-                                match_mode, compiled_pattern):
-                    continue
-                entry_path = current / name
-                if needs_stat:
-                    try:
-                        stat = entry_path.stat()
-                    except OSError:
-                        continue
-                    if not _passes_filters(
-                        entry_path, True, stat,
-                        min_size, max_size,
-                        modified_after, modified_before,
-                        ext_set,
-                    ):
-                        continue
-                # FFX-I09: content filter (files only; directories never excluded)
-                if content_query is not None:
-                    if not _file_content_matches(
-                        entry_path,
-                        content_query,
-                        match_mode,
-                        case_sensitive,
-                        content_max_bytes,
-                        _compiled=_content_compiled,
-                    ):
-                        continue
-                results.append(MatchEntry(path=entry_path, kind=EntryKind.FILES))
-
-            # FFX-I05: archive transparency — enumerate members of any archive
-            # file found in the current directory when search_archives is True.
-            # This is independent of whether the archive's own name matched;
-            # we inspect every archive in *filenames* (post-ignore-filter).
-            if search_archives:
-                for name in filenames:
-                    entry_path = current / name
-                    if entry_path.suffix.lower() not in _ARCHIVE_EXTENSIONS:
-                        continue
-                    results.extend(
-                        _enumerate_archive_members(
-                            entry_path,
-                            name_seed,
-                            case_sensitive,
-                            match_mode,
-                            compiled_pattern,
-                        )
-                    )
-
-    return results
+    Raises
+    ------
+    ValueError, InvalidRegexError, ContentSearchUngatedError:
+        Same conditions as :func:`list_entries`.
+    """
+    skipped: list[SkippedEntry] = []
+    entries = list(iter_entries(
+        path,
+        kind,
+        name_seed,
+        case_sensitive=case_sensitive,
+        match_mode=match_mode,
+        min_size=min_size,
+        max_size=max_size,
+        modified_after=modified_after,
+        modified_before=modified_before,
+        extensions=extensions,
+        respect_ignore=respect_ignore,
+        ignore_globs=ignore_globs,
+        search_archives=search_archives,
+        content_query=content_query,
+        content_max_bytes=content_max_bytes,
+        include_hidden=include_hidden,
+        _skipped=skipped,
+    ))
+    return ListingResult(entries=entries, skipped=skipped)
 
 
 def entry_metadata(path: str | Path) -> dict:
@@ -1028,6 +1451,7 @@ def remove_entries(
     dry_run: bool = True,
     confirm: bool = False,
     versioning: bool = False,
+    only_paths: Iterable[str] | None = None,
 ) -> RemovalReport:
     """
     Walk *path*, filter by *name_seed*, and remove matched entries.
@@ -1070,11 +1494,17 @@ def remove_entries(
         ``<path>/.ffe-versions/<YYYYMMDD-HHMMSS>/`` preserving relative
         structure.  Default False preserves the existing send2trash /
         stdlib-delete behaviour exactly.
+    only_paths:
+        Optional explicit subset restriction (SPEC-18 multi-select).  When
+        provided, only the intersection of the seed-matched set and
+        *only_paths* is acted on.  Paths in *only_paths* that are not in the
+        seed-matched set are silently ignored (cannot widen the action set).
+        ``None`` (default) preserves exact pre-change behaviour.
 
     Returns
     -------
     RemovalReport
-        .matched      — all paths that matched the filter
+        .matched      — paths acted on (after optional only_paths intersection)
         .removed      — paths successfully removed (empty on dry_run)
         .failed       — [(path, error_message), ...] for any removal error
         .dry_run      — mirrors the dry_run parameter
@@ -1085,7 +1515,7 @@ def remove_entries(
     EmptySeedError
         If name_seed is blank or whitespace-only.
     ValueError
-        If dry_run is False but confirm is also False, or path is not a dir.
+        If confirm is not True when not in preview mode, or path is not a dir.
     """
     _guard_destructive_seed(name_seed, "remove_entries")
     root_path = _normalise_path(path)
@@ -1106,7 +1536,7 @@ def remove_entries(
         search_archives=False,
         ignore_globs=[".ffe-versions/"],
     )
-    matched_paths = [e.path for e in matches]
+    matched_paths = _apply_only_paths([e.path for e in matches], only_paths)
     report = RemovalReport(matched=matched_paths, dry_run=dry_run)
 
     if dry_run:
@@ -1128,6 +1558,7 @@ def remove_entries(
                 shutil.move(str(entry_path), str(dest))
                 report.removed.append(entry_path)
             except OSError as exc:
+                logger.warning("Failed to version-move %s: %s", entry_path, exc)
                 report.failed.append((entry_path, str(exc)))
         return report
 
@@ -1143,6 +1574,7 @@ def remove_entries(
                     shutil.rmtree(entry_path, ignore_errors=False)
             report.removed.append(entry_path)
         except OSError as exc:
+            logger.warning("Failed to remove %s: %s", entry_path, exc)
             report.failed.append((entry_path, str(exc)))
 
     return report
@@ -1156,6 +1588,7 @@ def compress_entries(
     case_sensitive: bool = True,
     dry_run: bool = True,
     confirm: bool = False,
+    only_paths: Iterable[str] | None = None,
 ) -> CompressionReport:
     """
     Walk *path*, filter by *name_seed*, compress matched entries into zip
@@ -1182,11 +1615,15 @@ def compress_entries(
     ----------
     path, kind, name_seed, case_sensitive, dry_run, confirm:
         Same semantics as remove_entries.
+    only_paths:
+        Optional explicit subset restriction (SPEC-18 multi-select).  Same
+        semantics as in remove_entries: narrows the acted-on set; cannot widen
+        it; ``None`` (default) = full matched set.
 
     Returns
     -------
     CompressionReport
-        .matched  — paths that matched the filter
+        .matched  — paths acted on (after optional only_paths intersection)
         .archives — zip archive paths created (empty on dry_run)
         .failed   — [(path, error_message), ...]
         .dry_run  — mirrors the dry_run parameter
@@ -1196,7 +1633,7 @@ def compress_entries(
     EmptySeedError
         If name_seed is blank or whitespace-only.
     ValueError
-        If dry_run=False but confirm=False, or if *path* is not a directory.
+        If the gate conditions are not met, or *path* is not a directory.
     """
     _guard_destructive_seed(name_seed, "compress_entries")
     root_path = _normalise_path(path)
@@ -1212,7 +1649,7 @@ def compress_entries(
     # entries (they are not real filesystem paths — invariant 2 / FFX-I05 guard).
     matches = list_entries(root_path, kind, name_seed, case_sensitive=case_sensitive,
                            search_archives=False)
-    matched_paths = [e.path for e in matches]
+    matched_paths = _apply_only_paths([e.path for e in matches], only_paths)
     report = CompressionReport(matched=matched_paths, dry_run=dry_run)
 
     if dry_run:
@@ -1263,6 +1700,281 @@ def compress_entries(
                     report.failed.append((fd, f"post-compress delete failed: {exc}"))
             except OSError as exc:
                 report.failed.append((fd, str(exc)))
+
+    return report
+
+
+# ---------------------------------------------------------------------------
+# Bulk copy / move operations  (SPEC-18 — gated destructive-style ops)
+# ---------------------------------------------------------------------------
+
+def _validate_destination(destination: str | Path, source_root: Path) -> Path:
+    """Validate and return the resolved destination directory.
+
+    Creates the destination (with parents) if it does not already exist.
+    Raises ``ValueError`` if the destination resolves inside *source_root*
+    (recursion guard).
+
+    Parameters
+    ----------
+    destination:
+        Target directory path (string or Path).
+    source_root:
+        The resolved source root from which entries are being transferred.
+
+    Returns
+    -------
+    Path
+        Resolved absolute destination directory.
+
+    Raises
+    ------
+    ValueError
+        If the destination would be inside *source_root* (recursion risk).
+    """
+    dest = Path(destination).resolve()
+    # Recursion guard: destination must not be inside source_root.
+    try:
+        dest.relative_to(source_root)
+        # If we get here, dest IS inside source_root — that is a problem.
+        raise ValueError(
+            f"copy/move destination {dest!r} is inside the source root "
+            f"{source_root!r} which would cause recursion.  "
+            "Choose a destination outside the source tree."
+        )
+    except ValueError as exc:
+        # Re-raise only our own recursion error; the relative_to failure
+        # (dest is NOT inside source_root) means we are safe to proceed.
+        if "recursion" in str(exc):
+            raise
+    # Create the destination directory if it does not exist.
+    dest.mkdir(parents=True, exist_ok=True)
+    return dest
+
+
+def copy_entries(
+    path: str | Path,
+    kind: EntryKind | int,
+    name_seed: str,
+    *,
+    destination: str | Path,
+    case_sensitive: bool = True,
+    match_mode: str = "substring",
+    dry_run: bool = True,
+    confirm: bool = False,
+    only_paths: Iterable[str] | None = None,
+) -> TransferReport:
+    """Walk *path*, filter by *name_seed*, and copy matched entries to
+    *destination*.
+
+    Safety guards (identical to :func:`remove_entries`):
+
+    1. *name_seed* must be non-empty and non-whitespace — ``EmptySeedError``
+       otherwise.
+    2. *dry_run* defaults to ``True`` — returns the would-affect list without
+       copying anything; safe preview mode.
+    3. Setting *confirm* to ``True`` alongside *dry_run* set to ``False`` is
+       the only way to actually copy entries.  Both flags must be set together.
+
+    Copy semantics:
+    - Files: ``shutil.copy2`` (preserves metadata).
+    - Directories: ``shutil.copytree`` with ``dirs_exist_ok=True`` (handles
+      existing targets gracefully).
+    - Per-item failures are collected into ``TransferReport.failed``; the
+      batch always completes (a failure never aborts remaining items).
+
+    Parameters
+    ----------
+    path:
+        Root directory to walk.
+    kind:
+        :attr:`EntryKind.FOLDERS` (0) or :attr:`EntryKind.FILES` (1).
+    name_seed:
+        Non-empty filter pattern.  Blank raises ``EmptySeedError``.
+    destination:
+        Target directory.  Created (with parents) if it does not exist.
+        Must not be inside *path* (recursion guard).
+    case_sensitive:
+        Case-sensitive name matching (default ``True``).
+    match_mode:
+        ``"substring"`` (default), ``"glob"``, or ``"regex"``.
+    dry_run:
+        When ``True`` (default), return the preview list without copying.
+    confirm:
+        Explicit opt-in token (default ``False``).  Must be set to ``True``
+        together with *dry_run* set to ``False`` to actually copy.
+    only_paths:
+        Optional explicit subset restriction (SPEC-18 multi-select).  Same
+        semantics as in remove_entries: narrows the acted-on set; cannot widen
+        it; ``None`` (default) = full matched set.
+
+    Returns
+    -------
+    TransferReport
+        ``.kind``        — ``"copy"``.
+        ``.matched``     — paths acted on (after optional only_paths intersection).
+        ``.transferred`` — paths successfully copied (empty on dry-run).
+        ``.failed``      — ``[(source_path, error_message), ...]``.
+        ``.dry_run``     — mirrors the *dry_run* parameter.
+        ``.destination`` — destination directory (str), or ``None`` on
+                           dry-run.
+        ``.would_affect`` — alias for ``.matched``.
+
+    Raises
+    ------
+    EmptySeedError
+        If *name_seed* is blank or whitespace-only.
+    ValueError
+        If the gate conditions are not met, *path* is not a directory, or
+        *destination* is inside *path*.
+    """
+    _guard_destructive_seed(name_seed, "copy_entries")
+    root_path = _normalise_path(path)
+    kind = EntryKind(int(kind))
+
+    if not dry_run and not confirm:
+        raise ValueError(
+            "copy_entries() requires the confirm flag to be True when the "
+            "dry_run flag is False.  Set both flags explicitly to mutate."
+        )
+
+    matches = list_entries(
+        root_path, kind, name_seed,
+        case_sensitive=case_sensitive,
+        match_mode=match_mode,
+        search_archives=False,
+    )
+    matched_paths = _apply_only_paths([e.path for e in matches], only_paths)
+    report = TransferReport(kind="copy", matched=matched_paths, dry_run=dry_run)
+
+    if dry_run:
+        return report
+
+    dest_dir = _validate_destination(destination, root_path)
+    report.destination = str(dest_dir)
+
+    for src in matched_paths:
+        target = dest_dir / src.name
+        try:
+            if src.is_dir():
+                shutil.copytree(str(src), str(target), dirs_exist_ok=True)
+            else:
+                shutil.copy2(str(src), str(target))
+            report.transferred.append(src)
+        except OSError as exc:
+            logger.warning("copy_entries: failed to copy %s -> %s: %s", src, target, exc)
+            report.failed.append((src, str(exc)))
+
+    return report
+
+
+def move_entries(
+    path: str | Path,
+    kind: EntryKind | int,
+    name_seed: str,
+    *,
+    destination: str | Path,
+    case_sensitive: bool = True,
+    match_mode: str = "substring",
+    dry_run: bool = True,
+    confirm: bool = False,
+    only_paths: Iterable[str] | None = None,
+) -> TransferReport:
+    """Walk *path*, filter by *name_seed*, and move matched entries to
+    *destination*.
+
+    Safety guards (identical to :func:`remove_entries`):
+
+    1. *name_seed* must be non-empty and non-whitespace — ``EmptySeedError``
+       otherwise.
+    2. *dry_run* defaults to ``True`` — returns the would-affect list without
+       moving anything; safe preview mode.
+    3. Setting *confirm* to ``True`` alongside *dry_run* set to ``False`` is
+       the only way to actually move entries.  Both flags must be set together.
+
+    Move semantics:
+    - ``shutil.move`` for both files and directories.
+    - Per-item failures are collected into ``TransferReport.failed``; the
+      batch always completes (a failure never aborts remaining items).
+
+    Parameters
+    ----------
+    path:
+        Root directory to walk.
+    kind:
+        :attr:`EntryKind.FOLDERS` (0) or :attr:`EntryKind.FILES` (1).
+    name_seed:
+        Non-empty filter pattern.  Blank raises ``EmptySeedError``.
+    destination:
+        Target directory.  Created (with parents) if it does not exist.
+        Must not be inside *path* (recursion guard).
+    case_sensitive:
+        Case-sensitive name matching (default ``True``).
+    match_mode:
+        ``"substring"`` (default), ``"glob"``, or ``"regex"``.
+    dry_run:
+        When ``True`` (default), return the preview list without moving.
+    confirm:
+        Explicit opt-in token (default ``False``).  Must be set to ``True``
+        together with *dry_run* set to ``False`` to actually move.
+    only_paths:
+        Optional explicit subset restriction (SPEC-18 multi-select).  Same
+        semantics as in remove_entries: narrows the acted-on set; cannot widen
+        it; ``None`` (default) = full matched set.
+
+    Returns
+    -------
+    TransferReport
+        ``.kind``        — ``"move"``.
+        ``.matched``     — paths acted on (after optional only_paths intersection).
+        ``.transferred`` — paths successfully moved (empty on dry-run).
+        ``.failed``      — ``[(source_path, error_message), ...]``.
+        ``.dry_run``     — mirrors the *dry_run* parameter.
+        ``.destination`` — destination directory (str), or ``None`` on
+                           dry-run.
+        ``.would_affect`` — alias for ``.matched``.
+
+    Raises
+    ------
+    EmptySeedError
+        If *name_seed* is blank or whitespace-only.
+    ValueError
+        If the gate conditions are not met, *path* is not a directory, or
+        *destination* is inside *path*.
+    """
+    _guard_destructive_seed(name_seed, "move_entries")
+    root_path = _normalise_path(path)
+    kind = EntryKind(int(kind))
+
+    if not dry_run and not confirm:
+        raise ValueError(
+            "move_entries() requires the confirm flag to be True when the "
+            "dry_run flag is False.  Set both flags explicitly to mutate."
+        )
+
+    matches = list_entries(
+        root_path, kind, name_seed,
+        case_sensitive=case_sensitive,
+        match_mode=match_mode,
+        search_archives=False,
+    )
+    matched_paths = _apply_only_paths([e.path for e in matches], only_paths)
+    report = TransferReport(kind="move", matched=matched_paths, dry_run=dry_run)
+
+    if dry_run:
+        return report
+
+    dest_dir = _validate_destination(destination, root_path)
+    report.destination = str(dest_dir)
+
+    for src in matched_paths:
+        target = dest_dir / src.name
+        try:
+            shutil.move(str(src), str(target))
+            report.transferred.append(src)
+        except OSError as exc:
+            logger.warning("move_entries: failed to move %s -> %s: %s", src, target, exc)
+            report.failed.append((src, str(exc)))
 
     return report
 
@@ -1334,7 +2046,8 @@ def largest_entries(
             entry_path = current / name
             try:
                 size = entry_path.stat().st_size
-            except OSError:
+            except OSError as exc:
+                logger.debug("Skipping unreadable entry %s: %s", entry_path, exc)
                 continue
             sized.append(SizedEntry(path=str(entry_path), size=size))
 

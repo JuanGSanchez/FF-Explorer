@@ -1600,3 +1600,495 @@ class TestPostLargest:
         assert resp.status_code == 200
         data = resp.json()
         assert set(data.keys()) >= {"entries", "count"}
+
+
+# ---------------------------------------------------------------------------
+# SPEC-17 — include_hidden field on POST /entries
+# ---------------------------------------------------------------------------
+
+class TestIncludeHidden:
+    """SPEC-17: include_hidden=false excludes dotfiles; default (true) includes them."""
+
+    @pytest.fixture()
+    def hidden_tree(self, tmp_path: Path) -> Path:
+        """Tree with a visible file and a POSIX dotfile."""
+        (tmp_path / "visible.txt").write_text("visible")
+        (tmp_path / ".hidden").write_text("hidden")
+        return tmp_path
+
+    def test_default_includes_dotfile(self, client, hidden_tree):
+        """include_hidden omitted (default True): dotfile appears in results."""
+        resp = client.post("/entries", json={
+            "path": str(hidden_tree), "kind": 1, "name_seed": "",
+        })
+        assert resp.status_code == 200
+        names = [Path(e["path"]).name for e in resp.json()["entries"]]
+        assert ".hidden" in names
+        assert "visible.txt" in names
+
+    def test_include_hidden_true_explicit_includes_dotfile(self, client, hidden_tree):
+        """Explicit include_hidden=true: dotfile still appears."""
+        resp = client.post("/entries", json={
+            "path": str(hidden_tree), "kind": 1, "name_seed": "",
+            "include_hidden": True,
+        })
+        assert resp.status_code == 200
+        names = [Path(e["path"]).name for e in resp.json()["entries"]]
+        assert ".hidden" in names
+
+    def test_include_hidden_false_excludes_dotfile(self, client, hidden_tree):
+        """include_hidden=false: POSIX dotfile is excluded; visible file remains."""
+        resp = client.post("/entries", json={
+            "path": str(hidden_tree), "kind": 1, "name_seed": "",
+            "include_hidden": False,
+        })
+        assert resp.status_code == 200
+        names = [Path(e["path"]).name for e in resp.json()["entries"]]
+        assert ".hidden" not in names
+        assert "visible.txt" in names
+
+    def test_include_hidden_field_in_model(self, client):
+        """ListEntriesRequest exposes the include_hidden field."""
+        from ff_explorer.api.rest import ListEntriesRequest
+        assert "include_hidden" in ListEntriesRequest.model_fields
+        field = ListEntriesRequest.model_fields["include_hidden"]
+        assert field.default is True
+
+
+# ---------------------------------------------------------------------------
+# SPEC-18 — POST /copy and POST /move (gated destructive)
+# ---------------------------------------------------------------------------
+
+class TestPostCopy:
+    """SPEC-18: POST /copy — destructive gate, dry_run preview, live transfer."""
+
+    @pytest.fixture()
+    def copy_tree(self, tmp_path: Path) -> tuple[Path, Path]:
+        """Source tree + separate destination directory."""
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "keep.txt").write_text("keep")
+        (src / "copy_me_a.txt").write_text("a")
+        (src / "copy_me_b.txt").write_text("b")
+        dst = tmp_path / "dst"
+        dst.mkdir()
+        return src, dst
+
+    # ------------------------------------------------------------------
+    # Empty seed → 422
+    # ------------------------------------------------------------------
+
+    def test_empty_seed_422(self, client, copy_tree):
+        """Empty name_seed rejected at schema level (min_length=1) → HTTP 422."""
+        src, dst = copy_tree
+        resp = client.post("/copy", json={
+            "path": str(src), "kind": 1, "name_seed": "",
+            "destination": str(dst),
+        })
+        assert resp.status_code == 422
+
+    # ------------------------------------------------------------------
+    # dry_run=True (default) — preview, nothing copied
+    # ------------------------------------------------------------------
+
+    def test_dry_run_default_preview(self, client, copy_tree):
+        """Default dry_run=True: returns would_affect, nothing is copied."""
+        src, dst = copy_tree
+        resp = client.post("/copy", json={
+            "path": str(src), "kind": 1, "name_seed": "copy_me",
+            "destination": str(dst),
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["dry_run"] is True
+        assert data["kind"] == "copy"
+        assert len(data["matched"]) == 2
+        assert data["transferred"] == []
+        assert data["destination"] is None
+        # Source files still present; nothing in dst
+        assert (src / "copy_me_a.txt").exists()
+        assert not (dst / "copy_me_a.txt").exists()
+
+    def test_dry_run_false_no_confirm_422(self, client, copy_tree):
+        """dry_run=False without confirm=True → ValueError → HTTP 422."""
+        src, dst = copy_tree
+        resp = client.post("/copy", json={
+            "path": str(src), "kind": 1, "name_seed": "copy_me",
+            "destination": str(dst),
+            "dry_run": False, "confirm": False,
+        })
+        assert resp.status_code == 422
+
+    def test_dry_run_false_no_confirm_nothing_copied(self, client, copy_tree):
+        """Gate fires with confirm=False: destination remains empty."""
+        src, dst = copy_tree
+        client.post("/copy", json={
+            "path": str(src), "kind": 1, "name_seed": "copy_me",
+            "destination": str(dst),
+            "dry_run": False, "confirm": False,
+        })
+        assert not (dst / "copy_me_a.txt").exists()
+
+    # ------------------------------------------------------------------
+    # dry_run=False + confirm=True → live copy
+    # ------------------------------------------------------------------
+
+    def test_live_copy_copies_files(self, tmp_path):
+        """dry_run=False + confirm=True: matched files appear in destination."""
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "keep.txt").write_text("keep")
+        (src / "copy_me.txt").write_text("content")
+        dst = tmp_path / "dst"
+        dst.mkdir()
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with TestClient(app) as c:
+                resp = c.post("/copy", json={
+                    "path": str(src), "kind": 1, "name_seed": "copy_me",
+                    "destination": str(dst),
+                    "dry_run": False, "confirm": True,
+                })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["dry_run"] is False
+        assert data["kind"] == "copy"
+        assert len(data["transferred"]) == 1
+        assert data["destination"] == str(dst)
+        # Source still present (copy, not move)
+        assert (src / "copy_me.txt").exists()
+        # Destination has the copy
+        assert (dst / "copy_me.txt").exists()
+
+    def test_live_copy_source_snapshot_unchanged(self, tmp_path):
+        """After a live copy, the source tree is unchanged."""
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "copy_me.txt").write_text("content")
+        dst = tmp_path / "dst"
+        dst.mkdir()
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with TestClient(app) as c:
+                c.post("/copy", json={
+                    "path": str(src), "kind": 1, "name_seed": "copy_me",
+                    "destination": str(dst),
+                    "dry_run": False, "confirm": True,
+                })
+        # Original survives
+        assert (src / "copy_me.txt").exists()
+
+    # ------------------------------------------------------------------
+    # Nonexistent path → 422 (ValueError from core for bad path)
+    # ------------------------------------------------------------------
+
+    def test_nonexistent_path_422(self, client, tmp_path):
+        """Source path does not exist → ValueError from core → HTTP 422."""
+        resp = client.post("/copy", json={
+            "path": str(tmp_path / "no_such_src"), "kind": 1, "name_seed": "x",
+            "destination": str(tmp_path / "dst"),
+        })
+        assert resp.status_code == 422
+
+    # ------------------------------------------------------------------
+    # Response model fields
+    # ------------------------------------------------------------------
+
+    def test_response_model_fields(self, client, copy_tree):
+        """TransferReportResponse carries the expected keys."""
+        src, dst = copy_tree
+        resp = client.post("/copy", json={
+            "path": str(src), "kind": 1, "name_seed": "copy_me",
+            "destination": str(dst),
+        })
+        assert resp.status_code == 200
+        keys = set(resp.json().keys())
+        assert keys >= {"kind", "dry_run", "matched", "transferred", "failed",
+                        "destination", "would_affect"}
+
+    def test_would_affect_equals_matched(self, client, copy_tree):
+        """would_affect is the same list as matched on a dry-run."""
+        src, dst = copy_tree
+        resp = client.post("/copy", json={
+            "path": str(src), "kind": 1, "name_seed": "copy_me",
+            "destination": str(dst),
+        })
+        data = resp.json()
+        assert sorted(data["would_affect"]) == sorted(data["matched"])
+
+
+class TestPostMove:
+    """SPEC-18: POST /move — destructive gate, dry_run preview, live transfer."""
+
+    @pytest.fixture()
+    def move_tree(self, tmp_path: Path) -> tuple[Path, Path]:
+        """Source tree + separate destination directory."""
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "keep.txt").write_text("keep")
+        (src / "move_me_a.txt").write_text("a")
+        (src / "move_me_b.txt").write_text("b")
+        dst = tmp_path / "dst"
+        dst.mkdir()
+        return src, dst
+
+    # ------------------------------------------------------------------
+    # Empty seed → 422
+    # ------------------------------------------------------------------
+
+    def test_empty_seed_422(self, client, move_tree):
+        """Empty name_seed rejected at schema level (min_length=1) → HTTP 422."""
+        src, dst = move_tree
+        resp = client.post("/move", json={
+            "path": str(src), "kind": 1, "name_seed": "",
+            "destination": str(dst),
+        })
+        assert resp.status_code == 422
+
+    # ------------------------------------------------------------------
+    # dry_run=True (default) — preview, nothing moved
+    # ------------------------------------------------------------------
+
+    def test_dry_run_default_preview(self, client, move_tree):
+        """Default dry_run=True: returns would_affect, nothing is moved."""
+        src, dst = move_tree
+        resp = client.post("/move", json={
+            "path": str(src), "kind": 1, "name_seed": "move_me",
+            "destination": str(dst),
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["dry_run"] is True
+        assert data["kind"] == "move"
+        assert len(data["matched"]) == 2
+        assert data["transferred"] == []
+        assert data["destination"] is None
+        # Source files still present
+        assert (src / "move_me_a.txt").exists()
+        assert not (dst / "move_me_a.txt").exists()
+
+    def test_dry_run_false_no_confirm_422(self, client, move_tree):
+        """dry_run=False without confirm=True → ValueError → HTTP 422."""
+        src, dst = move_tree
+        resp = client.post("/move", json={
+            "path": str(src), "kind": 1, "name_seed": "move_me",
+            "destination": str(dst),
+            "dry_run": False, "confirm": False,
+        })
+        assert resp.status_code == 422
+
+    def test_dry_run_false_no_confirm_nothing_moved(self, client, move_tree):
+        """Gate fires: source files remain, destination empty."""
+        src, dst = move_tree
+        client.post("/move", json={
+            "path": str(src), "kind": 1, "name_seed": "move_me",
+            "destination": str(dst),
+            "dry_run": False, "confirm": False,
+        })
+        assert (src / "move_me_a.txt").exists()
+        assert not (dst / "move_me_a.txt").exists()
+
+    # ------------------------------------------------------------------
+    # dry_run=False + confirm=True → live move
+    # ------------------------------------------------------------------
+
+    def test_live_move_transfers_files(self, tmp_path):
+        """dry_run=False + confirm=True: matched files are moved to destination."""
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "keep.txt").write_text("keep")
+        (src / "move_me.txt").write_text("content")
+        dst = tmp_path / "dst"
+        dst.mkdir()
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with TestClient(app) as c:
+                resp = c.post("/move", json={
+                    "path": str(src), "kind": 1, "name_seed": "move_me",
+                    "destination": str(dst),
+                    "dry_run": False, "confirm": True,
+                })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["dry_run"] is False
+        assert data["kind"] == "move"
+        assert len(data["transferred"]) == 1
+        assert data["destination"] == str(dst)
+        # Source is gone (it was moved)
+        assert not (src / "move_me.txt").exists()
+        # Destination has the file
+        assert (dst / "move_me.txt").exists()
+        # Non-matching file untouched
+        assert (src / "keep.txt").exists()
+
+    # ------------------------------------------------------------------
+    # Nonexistent source → 422
+    # ------------------------------------------------------------------
+
+    def test_nonexistent_path_422(self, client, tmp_path):
+        """Source path does not exist → ValueError → HTTP 422."""
+        resp = client.post("/move", json={
+            "path": str(tmp_path / "no_such_src"), "kind": 1, "name_seed": "x",
+            "destination": str(tmp_path / "dst"),
+        })
+        assert resp.status_code == 422
+
+    # ------------------------------------------------------------------
+    # Response model fields
+    # ------------------------------------------------------------------
+
+    def test_response_model_fields(self, client, move_tree):
+        """TransferReportResponse carries the expected keys."""
+        src, dst = move_tree
+        resp = client.post("/move", json={
+            "path": str(src), "kind": 1, "name_seed": "move_me",
+            "destination": str(dst),
+        })
+        assert resp.status_code == 200
+        keys = set(resp.json().keys())
+        assert keys >= {"kind", "dry_run", "matched", "transferred", "failed",
+                        "destination", "would_affect"}
+
+    def test_would_affect_equals_matched(self, client, move_tree):
+        """would_affect is the same list as matched on a dry-run."""
+        src, dst = move_tree
+        resp = client.post("/move", json={
+            "path": str(src), "kind": 1, "name_seed": "move_me",
+            "destination": str(dst),
+        })
+        data = resp.json()
+        assert sorted(data["would_affect"]) == sorted(data["matched"])
+
+
+# ---------------------------------------------------------------------------
+# SPEC-15 — POST /list_with_report
+# ---------------------------------------------------------------------------
+
+class TestPostListWithReport:
+    """SPEC-15: POST /list_with_report returns entries + skipped schema."""
+
+    @pytest.fixture()
+    def report_tree(self, tmp_path: Path) -> Path:
+        """Clean file tree with no permission errors (skipped will be empty)."""
+        (tmp_path / "alpha.txt").write_text("alpha")
+        (tmp_path / "beta.txt").write_text("beta")
+        sub = tmp_path / "subdir"
+        sub.mkdir()
+        (sub / "gamma.txt").write_text("gamma")
+        return tmp_path
+
+    # ------------------------------------------------------------------
+    # Happy path: clean tree → skipped == []
+    # ------------------------------------------------------------------
+
+    def test_returns_200_clean_tree(self, client, report_tree):
+        """Clean tree: HTTP 200, entries populated, skipped is empty list."""
+        resp = client.post("/list_with_report", json={
+            "path": str(report_tree), "kind": 1, "name_seed": "",
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "entries" in data
+        assert "skipped" in data
+        assert isinstance(data["skipped"], list)
+        assert data["skipped"] == []
+        assert data["skipped_count"] == 0
+
+    def test_entries_match_list_endpoint(self, client, report_tree):
+        """Entries from /list_with_report match what /entries returns for same params."""
+        params = {"path": str(report_tree), "kind": 1, "name_seed": ""}
+        resp_entries = client.post("/entries", json=params)
+        resp_report = client.post("/list_with_report", json=params)
+        assert resp_entries.status_code == 200
+        assert resp_report.status_code == 200
+        paths_entries = sorted(e["path"] for e in resp_entries.json()["entries"])
+        paths_report = sorted(e["path"] for e in resp_report.json()["entries"])
+        assert paths_entries == paths_report
+
+    def test_count_matches_entries_length(self, client, report_tree):
+        """count field equals len(entries)."""
+        resp = client.post("/list_with_report", json={
+            "path": str(report_tree), "kind": 1, "name_seed": "",
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["count"] == len(data["entries"])
+
+    def test_skipped_count_matches_skipped_length(self, client, report_tree):
+        """skipped_count equals len(skipped)."""
+        resp = client.post("/list_with_report", json={
+            "path": str(report_tree), "kind": 1, "name_seed": "",
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["skipped_count"] == len(data["skipped"])
+
+    def test_name_seed_filter_applies(self, client, report_tree):
+        """name_seed filter works: only 'alpha.txt' matches 'alpha'."""
+        resp = client.post("/list_with_report", json={
+            "path": str(report_tree), "kind": 1, "name_seed": "alpha",
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        names = [Path(e["path"]).name for e in data["entries"]]
+        assert names == ["alpha.txt"]
+        assert data["count"] == 1
+
+    def test_response_model_fields_present(self, client, report_tree):
+        """ListWithReportResponse carries entries, skipped, count, skipped_count."""
+        resp = client.post("/list_with_report", json={
+            "path": str(report_tree), "kind": 1, "name_seed": "",
+        })
+        assert resp.status_code == 200
+        keys = set(resp.json().keys())
+        assert keys >= {"entries", "skipped", "count", "skipped_count"}
+
+    def test_entry_shape(self, client, report_tree):
+        """Each entry has path, kind, in_archive (same shape as /entries)."""
+        resp = client.post("/list_with_report", json={
+            "path": str(report_tree), "kind": 1, "name_seed": "alpha",
+        })
+        assert resp.status_code == 200
+        entry = resp.json()["entries"][0]
+        assert "path" in entry
+        assert "kind" in entry
+        assert "in_archive" in entry
+
+    # ------------------------------------------------------------------
+    # include_hidden also works on /list_with_report (SPEC-17 passthrough)
+    # ------------------------------------------------------------------
+
+    def test_include_hidden_false_on_list_with_report(self, client, tmp_path):
+        """include_hidden=false on /list_with_report excludes dotfiles."""
+        (tmp_path / "visible.txt").write_text("v")
+        (tmp_path / ".dotfile").write_text("d")
+        resp = client.post("/list_with_report", json={
+            "path": str(tmp_path), "kind": 1, "name_seed": "",
+            "include_hidden": False,
+        })
+        assert resp.status_code == 200
+        names = [Path(e["path"]).name for e in resp.json()["entries"]]
+        assert "visible.txt" in names
+        assert ".dotfile" not in names
+
+    # ------------------------------------------------------------------
+    # Error paths: existing /entries conventions apply
+    # ------------------------------------------------------------------
+
+    def test_invalid_path_422(self, client, tmp_path):
+        """Non-existent path → ValueError from service → HTTP 422."""
+        resp = client.post("/list_with_report", json={
+            "path": str(tmp_path / "no_such"), "kind": 1, "name_seed": "",
+        })
+        assert resp.status_code == 422
+
+    def test_existing_entries_endpoint_unchanged(self, client, report_tree):
+        """POST /entries still returns 200 with the same count (back-compat)."""
+        resp = client.post("/entries", json={
+            "path": str(report_tree), "kind": 1, "name_seed": "",
+        })
+        assert resp.status_code == 200
+        assert resp.json()["count"] >= 3

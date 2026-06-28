@@ -13,10 +13,19 @@ principles_applied:
   inherited:
     - P1 — Source-of-Truth Grounding
     - P2 — Full Determinism
+    - P3 — Systematicity
     - P4 — Consistency
     - P5 — Context Budget Discipline
     - P6 — Self-Containment
     - P7 — Reference Hygiene
+    - P8 — Principles Inheritance
+    - P9 — Role Separation
+    - P10 — Exit-Status Determinism
+    - P11 — Programmatic Determinism
+    - P12 — Maximal-Effort Completeness
+    - P13 — Token Economy
+  refs:
+    - "R17 Engineering Disciplines; cite repo-enhancer/orchestrator.md CONVENTIONS."
   custom:
     - id: C1
       name: Icon-Trap Guard (FFX-B01)

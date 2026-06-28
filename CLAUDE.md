@@ -32,7 +32,7 @@ on." Apply it by default to every request:
   and depth, not verbosity: it never overrides minimal-diff or economical prose, and adds no
   unrequested refactors. See `.claude/instructions/ai-execution-discipline.md` Rule 11; a standing
   user-level SessionStart hook (`$HOME/.claude/hooks/claude-orchestration-contract.py`) reinforces it
-  across sessions.
+  across sessions (external dependency; no per-project copy is created or required).
 - **The `.claude/agents/orchestrator.md` subagent is the dispatchable embodiment of this same
   contract** — invoke it (`@agent-orchestrator`, or via the Task tool) when you want a dedicated Opus
   4.8 coordinator or nested delegation (requires Claude Code ≥ v2.1.172). The authority is THIS
@@ -46,12 +46,28 @@ on." Apply it by default to every request:
 ## Principles Applied
 - P1 Source-of-Truth Grounding — architecture/commands below are verified against the real code
   (`ff_explorer/core.py`, `pyproject.toml`), not assumed; read the named file before acting on it.
+- P2 Full Determinism — Operating contract decision points and invariants are explicit; no
+  ambiguous branches.
+- P3 Systematicity — work decomposes into bounded, sequenced, single-owner tasks per the role split.
+- P4 Consistency — same invariants and role boundaries apply to every session and every agent.
 - P5 Context Budget Discipline — target files by search (Grep/Glob), read only the region you need.
 - P6 Self-Containment — invariants, gate/build commands, and agent roles are stated here with
   explicit paths; no implicit cross-references.
 - P7 Reference Hygiene — every path named here resolves in the tree.
-- P9 Maximal-Effort Completeness — the Operating contract's default: full coverage and definitive
+- P8 Principles Inheritance — this block is the inheritance root; agents and skills carry their
+  own Principles Applied blocks derived from it.
+- P9 Role Separation — role split (orchestrate/operate/dev/review) enforced by the agent roster;
+  no agent crosses its boundary.
+- P10 Exit-Status Determinism — agents return typed EXIT STATUS; the contract reacts per status.
+- P11 Programmatic Determinism — hooks enforce invariants 1–6 deterministically (harness layer);
+  cite: `repo-enhancer/orchestrator.md` CONVENTIONS R18/P11.
+- P12 Maximal-Effort Completeness — the Operating contract's default: full coverage and definitive
   follow-through over bare-minimum passes, governing depth not verbosity.
+- P13 Token Economy — minimal context loading; search-first, read-only-the-region.
+Engineering Disciplines (R17) and Programmatic Determinism (R18/P11): canonical definitions at
+`repo-enhancer/orchestrator.md` CONVENTIONS; applied to all LLM-facing assets and hooks in this tree.
+Deployment: `deployment_target: claude_code` — real deployed `.claude/` tree (agents, skills,
+hooks, settings.json); not a design-only specification.
 
 ## Architecture (one core, many faces) — search to these, don't bulk-read
 - **Headless core** — `ff_explorer/core.py`: query (`list_entries`, `entry_metadata`,
@@ -136,12 +152,15 @@ may be overridden by `CLAUDE_CODE_SUBAGENT_MODEL` and is ignored on some Claude 
 ### Instructions (`.claude/instructions/`) — agents reference these, don't restate them
 - **ai-execution-discipline.md** — verify-before-edit, assumption checks, minimal change, stop-and-confirm on irreversible/ambiguous, acceptance-criteria-driven done, context-budget (checkpoint ~70%, Gleaner=5), and Rule 11 maximal-effort completeness.
 - **python-repo-conventions.md** — stdlib-first, typing, headless-core purity, deterministic offline tests, no secrets, optional-dep groups.
+- **sdd-constitution.md** — project non-negotiable engineering principles and SDD gate definitions; governs all SDD pipeline skills.
+- **pyside6-best-practices.md** — PySide6/Qt best practices (Qt-thread safety, offscreen testing, no-core-in-widgets); governs gui-dev.
 
 ### Skills (`.claude/skills/`)
 - **add-search-feature** — add a new search/filter capability to the core + thread it through the access layer + tests.
 - **expose-op** — add/thread a core op or param through service→REST→derived MCP tool, with error mapping, the destructive gate, and contract tests.
 - **run-quality-gate** (`scripts/run_gate.py`) — pytest+coverage + invariant grep sweep → PASS/FAIL.
 - **build-release** (`scripts/build_release.py`) — PyInstaller build with the FFX-B01 icon guard, send2trash bundling + clean-tree verify.
+- **SDD pipeline** (`specify`→`clarify`→`plan`→`tasks`→`analyze`→`checklist`) — drives feature work from spec through acceptance gate; `analyze` and `checklist` delegate gate execution to `run-quality-gate`.
 
 ### Hooks (`.claude/settings.json` + `.claude/hooks/`) — harness-enforced invariants
 - **headless_core_guard.py** (PreToolUse) — blocks a GUI/transport import into `ff_explorer/core.py` (invariant 1).

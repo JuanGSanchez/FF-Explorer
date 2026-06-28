@@ -326,6 +326,11 @@ EXPECTED_MCP_TOOL_NAMES = {
     "post_index_status_index_status_post",
     # FFX-I11 — size aggregation / largest-files (derived from FastMCP.from_fastapi)
     "post_largest_entries_largest_post",
+    # SPEC-18 — copy / move (gated destructive; derived from FastMCP.from_fastapi)
+    "post_copy_copy_post",
+    "post_move_move_post",
+    # SPEC-15 — list with skip report (derived from FastMCP.from_fastapi)
+    "post_list_with_report_list_with_report_post",
 }
 
 

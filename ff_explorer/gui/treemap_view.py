@@ -47,6 +47,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ff_explorer.gui.i18n import tr
+
 
 # ---------------------------------------------------------------------------
 # Internal data record
@@ -117,7 +119,12 @@ class _EntryRow(QWidget):
         self._path = path
         self.setFixedHeight(_ROW_HEIGHT)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        # Dynamic path data tooltip — not a help-registry entry (SPEC-02 note).
+        # setToolTip(path): path is a variable (not a string literal), so the
+        # SPEC-09 grep lint passes.  Accessible description is also set from
+        # the same data for keyboard/screen-reader accessibility (SPEC-03).
         self.setToolTip(path)
+        self.setAccessibleDescription(path)
 
         # Layout: bar placeholder (fixed width) + filename + size
         outer = QVBoxLayout(self)
@@ -140,7 +147,9 @@ class _EntryRow(QWidget):
         # Filename (truncated to basename for readability; full path in tooltip)
         name = Path(path).name
         name_lbl = QLabel(name)
+        # Dynamic path data tooltip — not a help-registry entry (SPEC-02 note).
         name_lbl.setToolTip(path)
+        name_lbl.setAccessibleDescription(path)
         name_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         name_lbl.setStyleSheet("font: 10pt Verdana; color: #141414;")
         row.addWidget(name_lbl)
@@ -210,7 +219,7 @@ class LargestEntriesView(QWidget):
     # ------------------------------------------------------------------
 
     def _setup_ui(self) -> None:
-        self.setWindowTitle("Disk Usage — Largest Files")
+        self.setWindowTitle(tr("Disk Usage — Largest Files"))
         self.setMinimumSize(560, 320)
         self.resize(640, 480)
 
@@ -219,7 +228,7 @@ class LargestEntriesView(QWidget):
         outer.setSpacing(4)
 
         # Header row
-        header = QLabel("Largest files (by size, descending)")
+        header = QLabel(tr("Largest files (by size, descending)"))
         header.setStyleSheet("font: bold 11pt Arial; color: #222222; padding: 4px;")
         outer.addWidget(header)
 
@@ -229,17 +238,17 @@ class LargestEntriesView(QWidget):
         col_row.setContentsMargins(4, 0, 4, 0)
         col_row.setSpacing(6)
 
-        bar_hdr = QLabel("Size (relative)")
+        bar_hdr = QLabel(tr("Size (relative)"))
         bar_hdr.setFixedWidth(_BAR_AREA_WIDTH)
         bar_hdr.setStyleSheet("font: bold 9pt Arial; color: #555555;")
         col_row.addWidget(bar_hdr)
 
-        name_hdr = QLabel("File name")
+        name_hdr = QLabel(tr("File name"))
         name_hdr.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         name_hdr.setStyleSheet("font: bold 9pt Arial; color: #555555;")
         col_row.addWidget(name_hdr)
 
-        size_hdr = QLabel("Size")
+        size_hdr = QLabel(tr("Size"))
         size_hdr.setFixedWidth(80)
         size_hdr.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         size_hdr.setStyleSheet("font: bold 9pt Arial; color: #555555;")
@@ -309,7 +318,7 @@ class LargestEntriesView(QWidget):
                 item.widget().deleteLater()
 
         if not self._entries:
-            self._status_label.setText("No entries to display.")
+            self._status_label.setText(tr("No entries to display."))
             return
 
         max_size = self._entries[0].size  # already sorted descending

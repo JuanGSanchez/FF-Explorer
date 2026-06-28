@@ -21,11 +21,12 @@ Filter controls (FFX-I01/FFX-I02):
     Extensions  — QLineEdit (comma/space-separated, e.g. ".txt, .md")
     All grouped under a collapsible "Filters ▼/▶" section.
 
-Extended filter controls (FFX-I04/I05/I09):
+Extended filter controls (FFX-I04/I05/I09/SPEC-17):
     Content contains — QLineEdit (FFX-I09): content_query; gated by core
     Search in archives — QCheckBox (FFX-I05): search_archives=True
     Respect .gitignore/.ignore — QCheckBox (FFX-I04): respect_ignore=True
     Extra ignore globs — QLineEdit (FFX-I04): ignore_globs (comma/space split)
+    Include hidden/system — QCheckBox (SPEC-17): include_hidden=False when unchecked
 
 Action controls (FFX-I03/I06/I07/I08/I10):
     Version (remove) — QCheckBox (FFX-I08): versioning=True on remove_entries
@@ -71,8 +72,8 @@ from __future__ import annotations
 import gc
 from pathlib import Path
 
-from PySide6.QtCore import QDate, QDateTime, Qt, QTimeZone
-from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtCore import QDate, QDateTime, QObject, QThread, Qt, QTimeZone, Signal
+from PySide6.QtGui import QIcon, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -85,28 +86,43 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
     QMainWindow,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QRadioButton,
     QSizePolicy,
     QSpinBox,
     QStatusBar,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
+    QWhatsThis,
     QWidget,
 )
 
 from ff_explorer.gui.theme import build_stylesheet, load_saved_theme
+from ff_explorer.gui.widget_info import info_text, register_info, register_info_text
+from ff_explorer.gui.settings_prefs import load_settings, save_settings
+from ff_explorer.gui.i18n import tr
 
 from ff_explorer import (
     EmptySeedError,
     EntryKind,
+    ListingResult,
+    MatchEntry,
+    SkippedEntry,
     compress_entries,
+    copy_entries,
+    entry_metadata,
+    iter_entries,
     list_entries,
+    move_entries,
     remove_entries,
     save_listing,
 )
@@ -116,6 +132,111 @@ from ff_explorer.rename import RenameRule, rename_entries
 from ff_explorer.presets import Preset, get_preset, list_presets, save_preset
 from ff_explorer.index import IndexManager
 from ff_explorer.gui._resources import resource_path
+
+
+# ---------------------------------------------------------------------------
+# Off-thread scan worker (SPEC-14)
+# ---------------------------------------------------------------------------
+
+# Number of entries between progress() signal emissions during the scan.
+_PROGRESS_INTERVAL = 50
+
+
+class _ScanWorker(QObject):
+    """Consumes :func:`iter_entries` on a background QThread.
+
+    Communicates exclusively via Qt signals — no QWidget access ever occurs
+    from the worker thread.  The worker is designed to be moved onto a QThread
+    via ``moveToThread``; its ``run`` slot is invoked by connecting it to the
+    thread's ``started`` signal.
+
+    Signals
+    -------
+    progress(int count, str current_path)
+        Emitted every ``_PROGRESS_INTERVAL`` entries during the scan.
+        ``count`` is the number of entries collected so far; ``current_path``
+        is the string representation of the most-recently yielded entry.
+    finished(list)
+        Emitted when the scan completes normally (not cancelled).
+        Carries the full list of :class:`MatchEntry` objects.
+    error(object)
+        Emitted when the generator raises an exception.
+        Carries the exception instance so the main thread can handle it.
+
+    Cancel contract
+    ---------------
+    Call :meth:`cancel` from the main thread at any time before or during the
+    scan.  The worker checks the flag between every ``yield``; once cancelled,
+    neither ``finished`` nor ``error`` is emitted — the worker returns silently.
+    Cancellation targets only the *scan/preview* phase.  A confirmed mutation
+    (dry_run=False) is never launched from this worker, so there is nothing
+    to cancel there.
+    """
+
+    progress = Signal(int, str)
+    finished = Signal(list)
+    # SPEC-15: emitted after finished with a (possibly empty) list of SkippedEntry
+    # objects for every path that could not be accessed during the walk.
+    skipped = Signal(list)
+    error = Signal(object)
+
+    def __init__(
+        self,
+        path: str,
+        kind: EntryKind,
+        seed: str,
+        list_kwargs: dict,
+    ) -> None:
+        super().__init__()
+        self._path = path
+        self._kind = kind
+        self._seed = seed
+        self._list_kwargs = list_kwargs
+        self._cancelled: bool = False
+
+    # ------------------------------------------------------------------
+    # Public API — called from the main thread only
+    # ------------------------------------------------------------------
+
+    def cancel(self) -> None:
+        """Set the cooperative cancel flag.  Thread-safe (simple bool write)."""
+        self._cancelled = True
+
+    # ------------------------------------------------------------------
+    # Slot — invoked by QThread.started signal on the worker thread
+    # ------------------------------------------------------------------
+
+    def run(self) -> None:
+        """Consume ``iter_entries`` and emit progress/finished/skipped/error.
+
+        No QWidget access occurs here.  All results are marshalled to the
+        main thread via signals.
+
+        SPEC-15: collects skipped paths via the iter_entries ``_skipped``
+        parameter.  When the scan completes normally, ``finished`` is emitted
+        with the matched entries list, then ``skipped`` is emitted with the
+        (possibly empty) list of SkippedEntry objects.
+        """
+        try:
+            collected: list[MatchEntry] = []
+            skipped_entries: list[SkippedEntry] = []
+            gen = iter_entries(
+                self._path, self._kind, self._seed,
+                _skipped=skipped_entries,
+                **self._list_kwargs,
+            )
+            for entry in gen:
+                if self._cancelled:
+                    return  # silent exit — neither finished nor error emitted
+                collected.append(entry)
+                if len(collected) % _PROGRESS_INTERVAL == 0:
+                    self.progress.emit(len(collected), str(entry.path))
+            if not self._cancelled:
+                self.finished.emit(collected)
+                self.skipped.emit(skipped_entries)
+        except Exception as exc:  # noqa: BLE001
+            if not self._cancelled:
+                self.error.emit(exc)
 
 
 # ---------------------------------------------------------------------------
@@ -135,23 +256,8 @@ _ACTION_LABELS: dict[str, int] = {
     "Save list": 1,
     "Remove list": 2,
     "Compress list": 3,
-}
-
-# Hover-help texts for each control (mirrors legacy text_man1..text_man5)
-_HELP_PATH = "Root path in which\nfiles or folders are searched."
-_HELP_SEED = "List of consecutive characters\ncontained in files/folders' name."
-_HELP_FOLDERS = "Folders search."
-_HELP_FILES = "Files search."
-_HELP_ACTION = "Actions to be applied to the resulting directory."
-
-# Per-action supplementary help text (mirrors legacy aux_man)
-_HELP_ACTION_DETAIL: dict[int, str] = {
-    1: "\n   Save directory of files/folders found",
-    2: "\n   Delete files/folders found",
-    3: (
-        "\n   For files, compress all in one .zip in root"
-        "\n   For folders, compress each one in root"
-    ),
+    "Copy list": 4,
+    "Move list": 5,
 }
 
 # Match-mode display labels → core param values
@@ -202,6 +308,8 @@ class MainWindow(QMainWindow):
         self._setup_window()
         self._setup_ui()
         self._setup_context_menu()
+        # SPEC-20: restore persisted preferences (path, mode, action, filters).
+        self._apply_saved_settings()
         # Apply the loaded theme stylesheet globally (after widgets are built).
         QApplication.instance().setStyleSheet(  # type: ignore[union-attr]
             build_stylesheet(self._active_theme)
@@ -212,7 +320,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _setup_window(self) -> None:
-        self.setWindowTitle(_TITLE)
+        self.setWindowTitle(tr(_TITLE))
         self.setFixedSize(280, _WIN_HEIGHT_COLLAPSED)
 
         # Centre on the primary screen (replaces Tk winfo_screenwidth math)
@@ -249,12 +357,10 @@ class MainWindow(QMainWindow):
         outer.setSpacing(10)
 
         # ---- Root path section ----
-        path_label = QLabel("Root path")
+        path_label = QLabel(tr("Root path"))
         path_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        path_label.setStyleSheet(
-            "background-color: #999999; color: blue; font: bold 12pt Arial; padding: 4px;"
-        )
-        path_label.setToolTip(_HELP_PATH)
+        path_label.setObjectName("sectionLabel")
+        register_info(path_label, "path")
         outer.addWidget(path_label)
 
         path_row = QHBoxLayout()
@@ -263,58 +369,42 @@ class MainWindow(QMainWindow):
         )
         self._path_edit.setReadOnly(True)
         self._path_edit.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._path_edit.setStyleSheet(
-            "background-color: white; color: black; font: 11pt Verdana; padding: 4px;"
-        )
-        self._path_edit.setToolTip(_HELP_PATH)
+        register_info(self._path_edit, "path")
         # Clicking the read-only field opens the folder picker — handled by
         # _ClickableLineEdit.mousePressEvent (calls super() then on_click)
         path_row.addWidget(self._path_edit)
 
-        browse_btn = QPushButton("Browse...")
+        browse_btn = QPushButton(tr("&Browse..."))  # SPEC-22: Alt+B mnemonic
         browse_btn.setFixedWidth(72)
-        browse_btn.setStyleSheet(
-            "background-color: white; color: black; font: 11pt Arial;"
-        )
-        browse_btn.setToolTip(_HELP_PATH)
+        register_info(browse_btn, "path_browse")
         browse_btn.clicked.connect(self._browse_path)
         path_row.addWidget(browse_btn)
+        self._browse_btn = browse_btn  # kept for tab-order wiring below
         outer.addLayout(path_row)
 
         # ---- Name seed section ----
-        seed_label = QLabel("Name seed")
+        seed_label = QLabel(tr("Name seed"))
         seed_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        seed_label.setStyleSheet(
-            "background-color: #999999; color: blue; font: bold 12pt Arial; padding: 4px;"
-        )
-        seed_label.setToolTip(_HELP_SEED)
+        seed_label.setObjectName("sectionLabel")
+        register_info(seed_label, "seed")
         outer.addWidget(seed_label)
 
         self._seed_edit = QLineEdit()
-        self._seed_edit.setStyleSheet(
-            "background-color: white; color: black; font: 11pt Verdana; padding: 4px;"
-        )
-        self._seed_edit.setToolTip(_HELP_SEED)
+        register_info(self._seed_edit, "seed")
         self._seed_edit.returnPressed.connect(self._run)
         outer.addWidget(self._seed_edit)
 
         # ---- Mode radio buttons (Folders / Files) ----
         mode_row = QHBoxLayout()
         self._mode_group = QButtonGroup(self)
-        self._radio_folders = QRadioButton("Folders")
+        self._radio_folders = QRadioButton(tr("Folders"))
         self._radio_folders.setChecked(True)  # d_type default = 0 (FOLDERS)
-        self._radio_folders.setStyleSheet(
-            "color: black; font: 12pt Verdana;"
-        )
-        self._radio_folders.setToolTip(_HELP_FOLDERS)
+        register_info(self._radio_folders, "mode_folders")
         self._mode_group.addButton(self._radio_folders, EntryKind.FOLDERS.value)
         mode_row.addWidget(self._radio_folders)
 
-        self._radio_files = QRadioButton("Files")
-        self._radio_files.setStyleSheet(
-            "color: black; font: 12pt Verdana;"
-        )
-        self._radio_files.setToolTip(_HELP_FILES)
+        self._radio_files = QRadioButton(tr("Files"))
+        register_info(self._radio_files, "mode_files")
         self._mode_group.addButton(self._radio_files, EntryKind.FILES.value)
         mode_row.addWidget(self._radio_files)
         outer.addLayout(mode_row)
@@ -322,25 +412,22 @@ class MainWindow(QMainWindow):
         # ---- Action combobox ----
         self._action_combo = QComboBox()
         self._action_combo.addItems(list(_ACTION_LABELS.keys()))
-        self._action_combo.setStyleSheet(
-            "background-color: #e6e6e6; font: 12pt Verdana; padding: 2px;"
-        )
         # Build combined tooltip for the combobox (action name + detail)
         self._action_combo.currentIndexChanged.connect(self._update_action_tooltip)
         self._update_action_tooltip()  # set initial tooltip
         outer.addWidget(self._action_combo)
 
         # ---- Run button ----
-        run_btn = QPushButton("Run")
+        run_btn = QPushButton(tr("&Run"))  # SPEC-22: Alt+R mnemonic
         run_btn.setFixedWidth(80)
-        run_btn.setStyleSheet(
-            "background-color: white; color: black; font: bold 12pt Arial; padding: 6px;"
-        )
+        run_btn.setObjectName("runButton")
         run_btn.setSizePolicy(
             QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
         )
         run_btn.setDefault(True)
+        register_info(run_btn, "run")
         run_btn.clicked.connect(self._run)
+        self._run_btn = run_btn  # kept for tab-order wiring below
 
         btn_row = QHBoxLayout()
         btn_row.addStretch()
@@ -348,11 +435,13 @@ class MainWindow(QMainWindow):
         btn_row.addStretch()
         outer.addLayout(btn_row)
 
+        # SPEC-22: Ctrl+Return shortcut — additional to returnPressed on seed_edit.
+        run_shortcut = QShortcut(QKeySequence("Ctrl+Return"), self)
+        run_shortcut.activated.connect(self._run)
+
         # ---- Filters toggle button (FFX-I01 / FFX-I02) ----
-        self._filters_toggle_btn = QPushButton("Filters ▶")
-        self._filters_toggle_btn.setToolTip(
-            "Expand to set match mode, size/date/extension filters."
-        )
+        self._filters_toggle_btn = QPushButton(tr("&Filters ▶"))  # SPEC-22: Alt+F mnemonic
+        register_info(self._filters_toggle_btn, "filters_toggle")
         self._filters_toggle_btn.setCheckable(True)
         self._filters_toggle_btn.setChecked(False)
         self._filters_toggle_btn.clicked.connect(self._toggle_filters)
@@ -369,12 +458,11 @@ class MainWindow(QMainWindow):
         outer.addWidget(self._filters_panel)
 
         # ---- Settings button ----
-        settings_btn = QPushButton("⚙ Settings")  # gear unicode
+        settings_btn = QPushButton(tr("⚙ Settings"))  # gear unicode
         settings_btn.setFixedWidth(100)
-        settings_btn.setToolTip(
-            "Open Settings to configure the application colour theme."
-        )
+        register_info(settings_btn, "settings")
         settings_btn.clicked.connect(self._open_settings)
+        self._settings_btn = settings_btn  # kept for tab-order wiring below
 
         settings_row = QHBoxLayout()
         settings_row.addStretch()
@@ -382,12 +470,11 @@ class MainWindow(QMainWindow):
         outer.addLayout(settings_row)
 
         # ---- Disk usage button (FFX-I11) ----
-        disk_usage_btn = QPushButton("Disk usage")
+        disk_usage_btn = QPushButton(tr("Disk usage"))
         disk_usage_btn.setFixedWidth(100)
-        disk_usage_btn.setToolTip(
-            "Show the largest files under the current root path."
-        )
+        register_info(disk_usage_btn, "disk_usage")
         disk_usage_btn.clicked.connect(self._open_disk_usage)
+        self._disk_usage_btn = disk_usage_btn  # kept for tab-order wiring below
 
         disk_usage_row = QHBoxLayout()
         disk_usage_row.addStretch()
@@ -395,13 +482,11 @@ class MainWindow(QMainWindow):
         outer.addLayout(disk_usage_row)
 
         # ---- Find duplicates button (FFX-I06) ----
-        dup_btn = QPushButton("Find duplicates")
+        dup_btn = QPushButton(tr("Find duplicates"))
         dup_btn.setFixedWidth(130)
-        dup_btn.setToolTip(
-            "Find groups of files with identical content under the current root path.\n"
-            "Results are shown in a read-only dialog."
-        )
+        register_info(dup_btn, "find_duplicates")
         dup_btn.clicked.connect(self._open_find_duplicates)
+        self._dup_btn = dup_btn  # kept for tab-order wiring below
 
         dup_row = QHBoxLayout()
         dup_row.addStretch()
@@ -409,13 +494,11 @@ class MainWindow(QMainWindow):
         outer.addLayout(dup_row)
 
         # ---- Batch rename button (FFX-I07) ----
-        rename_btn = QPushButton("Batch rename")
+        rename_btn = QPushButton(tr("Batch rename"))
         rename_btn.setFixedWidth(130)
-        rename_btn.setToolTip(
-            "Open the batch rename dialog to define a rule, preview changes,\n"
-            "and apply renaming to matched entries."
-        )
+        register_info(rename_btn, "batch_rename")
         rename_btn.clicked.connect(self._open_batch_rename)
+        self._rename_btn = rename_btn  # kept for tab-order wiring below
 
         rename_row = QHBoxLayout()
         rename_row.addStretch()
@@ -423,19 +506,17 @@ class MainWindow(QMainWindow):
         outer.addLayout(rename_row)
 
         # ---- Preset save/load row (FFX-I03) ----
-        preset_save_btn = QPushButton("Save preset")
+        preset_save_btn = QPushButton(tr("Save preset"))
         preset_save_btn.setFixedWidth(110)
-        preset_save_btn.setToolTip(
-            "Save the current search form state as a named preset."
-        )
+        register_info(preset_save_btn, "preset_save")
         preset_save_btn.clicked.connect(self._save_preset)
+        self._preset_save_btn = preset_save_btn  # kept for tab-order wiring below
 
-        preset_load_btn = QPushButton("Load preset")
+        preset_load_btn = QPushButton(tr("Load preset"))
         preset_load_btn.setFixedWidth(110)
-        preset_load_btn.setToolTip(
-            "Load a saved preset back into the search form."
-        )
+        register_info(preset_load_btn, "preset_load")
         preset_load_btn.clicked.connect(self._load_preset)
+        self._preset_load_btn = preset_load_btn  # kept for tab-order wiring below
 
         preset_row = QHBoxLayout()
         preset_row.addStretch()
@@ -445,14 +526,14 @@ class MainWindow(QMainWindow):
         outer.addLayout(preset_row)
 
         # ---- Live index checkbox (FFX-I10) ----
-        self._live_index_check = QCheckBox("Live index this root")
+        self._live_index_check = QCheckBox(tr("Live index this root"))
         self._live_index_check.setChecked(False)
-        self._live_index_check.setToolTip(
-            "Build an in-memory name index for the current root and watch for\n"
-            "filesystem changes in real time.  Queries use the index instead of\n"
-            "walking the tree.  Uncheck to stop and release the observer thread."
-        )
+        register_info(self._live_index_check, "live_index")
         self._live_index_check.toggled.connect(self._toggle_live_index)
+
+        # ---- Shift+F1 shortcut: enter WhatsThis mode (SPEC-04) ----
+        whats_this_shortcut = QShortcut(QKeySequence("Shift+F1"), self)
+        whats_this_shortcut.activated.connect(QWhatsThis.enterWhatsThisMode)
 
         index_row = QHBoxLayout()
         index_row.addStretch()
@@ -461,6 +542,26 @@ class MainWindow(QMainWindow):
         outer.addLayout(index_row)
 
         outer.addStretch()
+
+        # SPEC-22: explicit TAB ORDER across primary controls.
+        # Order: path_edit → browse → seed → mode_folders → mode_files →
+        #        action_combo → run_btn → filters_toggle → settings → disk_usage →
+        #        dup_btn → rename_btn → preset_save → preset_load → live_index
+        central.setFocusProxy(self._path_edit)
+        QMainWindow.setTabOrder(self._path_edit,    self._browse_btn)
+        QMainWindow.setTabOrder(self._browse_btn,   self._seed_edit)
+        QMainWindow.setTabOrder(self._seed_edit,    self._radio_folders)
+        QMainWindow.setTabOrder(self._radio_folders, self._radio_files)
+        QMainWindow.setTabOrder(self._radio_files,  self._action_combo)
+        QMainWindow.setTabOrder(self._action_combo, self._run_btn)
+        QMainWindow.setTabOrder(self._run_btn,      self._filters_toggle_btn)
+        QMainWindow.setTabOrder(self._filters_toggle_btn, self._settings_btn)
+        QMainWindow.setTabOrder(self._settings_btn, self._disk_usage_btn)
+        QMainWindow.setTabOrder(self._disk_usage_btn, self._dup_btn)
+        QMainWindow.setTabOrder(self._dup_btn,      self._rename_btn)
+        QMainWindow.setTabOrder(self._rename_btn,   self._preset_save_btn)
+        QMainWindow.setTabOrder(self._preset_save_btn, self._preset_load_btn)
+        QMainWindow.setTabOrder(self._preset_load_btn, self._live_index_check)
 
     def _build_filters_panel(self) -> QGroupBox:
         """Build the collapsible Filters panel (FFX-I01 / FFX-I02).
@@ -475,7 +576,7 @@ class MainWindow(QMainWindow):
         All widgets are styled only via the centralised QSS theme (no
         hard-coded colours) so they adapt to Light/Dark themes automatically.
         """
-        box = QGroupBox("Filters")
+        box = QGroupBox(tr("Filters"))
         layout = QVBoxLayout(box)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
@@ -483,24 +584,17 @@ class MainWindow(QMainWindow):
         # ---- Match mode + case sensitive ----
         match_row = QHBoxLayout()
 
-        match_label = QLabel("Match:")
+        match_label = QLabel(tr("Match:"))
         match_row.addWidget(match_label)
 
         self._match_mode_combo = QComboBox()
         self._match_mode_combo.addItems(list(_MATCH_MODE_LABELS.keys()))
-        self._match_mode_combo.setToolTip(
-            "Substring: seed 'in' name (default).\n"
-            "Glob: fnmatch pattern (*, ?, […]).\n"
-            "Regex: full regular expression."
-        )
+        register_info(self._match_mode_combo, "filter_match_mode")
         match_row.addWidget(self._match_mode_combo)
 
-        self._case_sensitive_check = QCheckBox("Case sensitive")
+        self._case_sensitive_check = QCheckBox(tr("Case sensitive"))
         self._case_sensitive_check.setChecked(True)
-        self._case_sensitive_check.setToolTip(
-            "When unchecked, the name match ignores case.\n"
-            "For Regex mode, re.IGNORECASE is applied."
-        )
+        register_info(self._case_sensitive_check, "filter_case_sensitive")
         match_row.addWidget(self._case_sensitive_check)
 
         layout.addLayout(match_row)
@@ -508,14 +602,14 @@ class MainWindow(QMainWindow):
         # ---- Size filters (KB; 0 = no bound) ----
         size_row = QHBoxLayout()
 
-        size_label = QLabel("Size (KB):")
+        size_label = QLabel(tr("Size (KB):"))
         size_row.addWidget(size_label)
 
         self._min_size_spin = QSpinBox()
         self._min_size_spin.setRange(0, 10_000_000)  # up to ~10 GB in KB
         self._min_size_spin.setValue(0)
         self._min_size_spin.setSpecialValueText("–")  # 0 displays as "–" (no bound)
-        self._min_size_spin.setToolTip("Minimum file size in KB (0 = no lower bound).")
+        register_info(self._min_size_spin, "filter_min_size")
         size_row.addWidget(self._min_size_spin)
 
         size_row.addWidget(QLabel("–"))
@@ -524,25 +618,23 @@ class MainWindow(QMainWindow):
         self._max_size_spin.setRange(0, 10_000_000)
         self._max_size_spin.setValue(0)
         self._max_size_spin.setSpecialValueText("–")  # 0 displays as "–" (no bound)
-        self._max_size_spin.setToolTip("Maximum file size in KB (0 = no upper bound).")
+        register_info(self._max_size_spin, "filter_max_size")
         size_row.addWidget(self._max_size_spin)
 
         layout.addLayout(size_row)
 
         # ---- Date filters (modified after / before) ----
         after_row = QHBoxLayout()
-        self._date_after_check = QCheckBox("Modified after:")
+        self._date_after_check = QCheckBox(tr("Modified after:"))
         self._date_after_check.setChecked(False)
-        self._date_after_check.setToolTip(
-            "Only include entries modified strictly after this date."
-        )
+        register_info(self._date_after_check, "filter_date_after")
         after_row.addWidget(self._date_after_check)
 
         self._date_after_edit = QDateEdit()
         self._date_after_edit.setCalendarPopup(True)
         self._date_after_edit.setDate(QDate.currentDate().addDays(-30))
         self._date_after_edit.setEnabled(False)
-        self._date_after_edit.setToolTip("Lower bound on modification date.")
+        register_info(self._date_after_edit, "filter_date_after_edit")
         after_row.addWidget(self._date_after_edit)
 
         layout.addLayout(after_row)
@@ -550,18 +642,16 @@ class MainWindow(QMainWindow):
         self._date_after_check.toggled.connect(self._date_after_edit.setEnabled)
 
         before_row = QHBoxLayout()
-        self._date_before_check = QCheckBox("Modified before:")
+        self._date_before_check = QCheckBox(tr("Modified before:"))
         self._date_before_check.setChecked(False)
-        self._date_before_check.setToolTip(
-            "Only include entries modified strictly before this date."
-        )
+        register_info(self._date_before_check, "filter_date_before")
         before_row.addWidget(self._date_before_check)
 
         self._date_before_edit = QDateEdit()
         self._date_before_edit.setCalendarPopup(True)
         self._date_before_edit.setDate(QDate.currentDate())
         self._date_before_edit.setEnabled(False)
-        self._date_before_edit.setToolTip("Upper bound on modification date.")
+        register_info(self._date_before_edit, "filter_date_before_edit")
         before_row.addWidget(self._date_before_edit)
 
         layout.addLayout(before_row)
@@ -570,80 +660,62 @@ class MainWindow(QMainWindow):
 
         # ---- Extensions filter ----
         ext_row = QHBoxLayout()
-        ext_label = QLabel("Extensions:")
+        ext_label = QLabel(tr("Extensions:"))
         ext_row.addWidget(ext_label)
 
         self._extensions_edit = QLineEdit()
-        self._extensions_edit.setPlaceholderText(".txt, .md, .log")
-        self._extensions_edit.setToolTip(
-            "Comma or space-separated extensions to include.\n"
-            "Example: .txt, .md\n"
-            "Leave empty for no extension filter."
-        )
+        self._extensions_edit.setPlaceholderText(tr(".txt, .md, .log"))
+        register_info(self._extensions_edit, "filter_extensions")
         ext_row.addWidget(self._extensions_edit)
 
         layout.addLayout(ext_row)
 
         # ---- Content search (FFX-I09) ----
         content_row = QHBoxLayout()
-        content_label = QLabel("Content contains:")
+        content_label = QLabel(tr("Content contains:"))
         content_row.addWidget(content_label)
 
         self._content_query_edit = QLineEdit()
-        self._content_query_edit.setPlaceholderText("grep pattern (requires name/type/size pre-filter)")
-        self._content_query_edit.setToolTip(
-            "Grep-style search inside file contents.\n"
-            "Only files whose content matches this query are returned.\n"
-            "REQUIRES at least one name/extension/size filter to be set\n"
-            "to limit the candidate set (performance gate)."
-        )
+        self._content_query_edit.setPlaceholderText(tr("grep pattern (requires name/type/size pre-filter)"))
+        register_info(self._content_query_edit, "filter_content_query")
         content_row.addWidget(self._content_query_edit)
 
         layout.addLayout(content_row)
 
         # ---- Archive transparency (FFX-I05) ----
-        self._search_archives_check = QCheckBox("Search inside archives")
+        self._search_archives_check = QCheckBox(tr("Search inside archives"))
         self._search_archives_check.setChecked(False)
-        self._search_archives_check.setToolTip(
-            "When checked, open matching ZIP/TAR/GZ archives and search their\n"
-            "internal member names against the name seed.\n"
-            "Archive-internal results are read-only and cannot be removed/compressed."
-        )
+        register_info(self._search_archives_check, "filter_search_archives")
         layout.addWidget(self._search_archives_check)
 
         # ---- Ignore-file awareness (FFX-I04) ----
-        self._respect_ignore_check = QCheckBox("Respect .gitignore/.ignore")
+        self._respect_ignore_check = QCheckBox(tr("Respect .gitignore/.ignore"))
         self._respect_ignore_check.setChecked(False)
-        self._respect_ignore_check.setToolTip(
-            "When checked, .gitignore and .ignore files found during the walk\n"
-            "are honoured; matching paths are excluded from results."
-        )
+        register_info(self._respect_ignore_check, "filter_respect_ignore")
         layout.addWidget(self._respect_ignore_check)
 
         ignore_globs_row = QHBoxLayout()
-        ignore_globs_label = QLabel("Extra ignore globs:")
+        ignore_globs_label = QLabel(tr("Extra ignore globs:"))
         ignore_globs_row.addWidget(ignore_globs_label)
 
         self._ignore_globs_edit = QLineEdit()
-        self._ignore_globs_edit.setPlaceholderText("*.pyc, __pycache__/")
-        self._ignore_globs_edit.setToolTip(
-            "Extra gitwildmatch glob patterns to exclude (comma or space separated).\n"
-            "Applied regardless of the .gitignore checkbox above."
-        )
+        self._ignore_globs_edit.setPlaceholderText(tr("*.pyc, __pycache__/"))
+        register_info(self._ignore_globs_edit, "filter_ignore_globs")
         ignore_globs_row.addWidget(self._ignore_globs_edit)
 
         layout.addLayout(ignore_globs_row)
 
         # ---- Versioned delete checkbox (FFX-I08) — shown only for Remove action ----
-        self._versioning_check = QCheckBox("Version (move to .ffe-versions) instead of recycle bin")
+        self._versioning_check = QCheckBox(tr("Version (move to .ffe-versions) instead of recycle bin"))
         self._versioning_check.setChecked(False)
-        self._versioning_check.setToolTip(
-            "When checked, removed entries are moved into a timestamped\n"
-            "<root>/.ffe-versions/<YYYYMMDD-HHMMSS>/ directory instead of the\n"
-            "recycle bin.  Provides a stronger, auditable recovery trail.\n"
-            "Applies only to the 'Remove list' action."
-        )
+        register_info(self._versioning_check, "filter_versioning")
         layout.addWidget(self._versioning_check)
+
+        # ---- Include hidden/system entries (SPEC-17) ----
+        self._include_hidden_check = QCheckBox(tr("Include hidden/system entries"))
+        self._include_hidden_check.setChecked(True)  # default True = current behaviour
+        register_info(self._include_hidden_check, "filter_include_hidden")
+        layout.addWidget(self._include_hidden_check)
 
         return box
 
@@ -654,7 +726,8 @@ class MainWindow(QMainWindow):
     def _toggle_filters(self, checked: bool) -> None:
         """Show or hide the filters panel and resize the window accordingly."""
         self._filters_panel.setVisible(checked)
-        self._filters_toggle_btn.setText("Filters ▼" if checked else "Filters ▶")
+        # SPEC-22: preserve &F mnemonic in both states.
+        self._filters_toggle_btn.setText(tr("&Filters ▼") if checked else tr("&Filters ▶"))
         new_height = _WIN_HEIGHT_EXPANDED if checked else _WIN_HEIGHT_COLLAPSED
         self.setFixedSize(280, new_height)
 
@@ -790,6 +863,10 @@ class MainWindow(QMainWindow):
         if ignore_globs is not None:
             kwargs["ignore_globs"] = ignore_globs
 
+        # SPEC-17: include_hidden — only add param when False (True is the default)
+        if not self._include_hidden_check.isChecked():
+            kwargs["include_hidden"] = False
+
         return kwargs
 
     def _get_ignore_globs(self) -> list[str] | None:
@@ -825,14 +902,14 @@ class MainWindow(QMainWindow):
     def _show_context_menu(self, pos) -> None:
         from PySide6.QtWidgets import QMenu
         menu = QMenu(self)
-        about_action = menu.addAction("About...")
-        exit_action = menu.addAction("Exit")
+        about_action = menu.addAction(tr("About..."))
+        exit_action = menu.addAction(tr("Exit"))
         action = menu.exec(self.mapToGlobal(pos))
         if action is about_action:
             QMessageBox.information(
                 self,
-                "About FF Explorer",
-                f"Author: {_AUTHOR}\nVersion: {_VERSION}\nLicense: {_LICENSE}",
+                tr("About FF Explorer"),
+                tr("Author: {author}\nVersion: {version}\nLicense: {license}").replace("{author}", _AUTHOR).replace("{version}", _VERSION).replace("{license}", _LICENSE),
             )
         elif action is exit_action:
             self._exit()
@@ -847,11 +924,23 @@ class MainWindow(QMainWindow):
         return EntryKind(btn_id)
 
     def _update_action_tooltip(self) -> None:
-        """Update the action combobox tooltip to include per-action detail."""
+        """Update the action combobox tooltip to include per-action detail.
+
+        Sources both parts from the registry:
+          base  = info_text("action")
+          detail = info_text("action_detail.<code>"), falls back to "" if absent.
+        Uses register_info_text so the _ff_info_key property is set to "action"
+        and all four widget-info setters (tooltip, accessible description,
+        whatsThis, _ff_info_key) are applied consistently.
+        """
         label = self._action_combo.currentText()
         code = _ACTION_LABELS.get(label, -1)
-        detail = _HELP_ACTION_DETAIL.get(code, "")
-        self._action_combo.setToolTip(_HELP_ACTION + detail)
+        base = info_text("action")
+        try:
+            detail = info_text(f"action_detail.{code}")
+        except KeyError:
+            detail = ""
+        register_info_text(self._action_combo, base + detail, "action")
 
     def _set_status(self, message: str) -> None:
         """Write *message* to the status bar (replaces print() calls)."""
@@ -867,7 +956,7 @@ class MainWindow(QMainWindow):
         start = current if (current != _PLACEHOLDER_PATH and Path(current).is_dir()) else ""
         chosen = QFileDialog.getExistingDirectory(
             self,
-            "FF Explorer — root path selection",
+            tr("FF Explorer — root path selection"),
             start,
         )
         if chosen:
@@ -879,26 +968,32 @@ class MainWindow(QMainWindow):
 
     def _run(self) -> None:
         """
-        Validate inputs and dispatch to the appropriate core function.
+        Validate inputs and start an off-thread scan (SPEC-14).
 
-        Validate inputs and dispatch to the core, with the safety gate preserved:
-          - Destructive ops (Remove / Compress) always call the core with
-            dry_run=True first, display the preview list, and only proceed on
-            explicit user confirmation.
-          - EmptySeedError is surfaced as a QMessageBox.warning.
-          - ValueError (including invalid regex from core) is surfaced as a
-            QMessageBox.warning with the error text.
+        Input validation is performed synchronously on the main thread.
+        The actual scan is delegated to a ``_ScanWorker`` moved onto a
+        ``QThread``; a ``QProgressDialog`` keeps the window responsive and
+        lets the user cancel.
+
+        Safety gate is preserved:
+          - The worker always performs the *scan* phase only.
+          - For Remove/Compress, the main thread shows the dry-run preview
+            and only on explicit Yes performs the mutation (inline, on the
+            main thread, after ``QMessageBox.question`` returns).
+          - EmptySeedError / ContentSearchUngatedError / ValueError / OSError
+            from the worker are routed back via the ``error`` signal and
+            surfaced by the same ``QMessageBox`` calls as before.
         """
         # --- Input validation (mirrors legacy accept() guards) ---
         path_text = self._path_edit.text()
         if path_text == _PLACEHOLDER_PATH or not path_text.strip():
-            QMessageBox.warning(self, "Warning!", "Source path not added")
+            QMessageBox.warning(self, tr("Warning!"), tr("Source path not added"))
             return
 
         action_label = self._action_combo.currentText()
         action_code = _ACTION_LABELS.get(action_label, -1)
         if action_code == -1:
-            QMessageBox.warning(self, "Warning!", "No action selected")
+            QMessageBox.warning(self, tr("Warning!"), tr("No action selected"))
             return
 
         path = path_text
@@ -906,92 +1001,627 @@ class MainWindow(QMainWindow):
         seed = self._seed_edit.text()
         entry_label = "file" if kind == EntryKind.FILES else "folder"
 
-        try:
-            if action_code == 1:
-                self._do_save(path, kind, seed, entry_label)
-            elif action_code == 2:
-                self._do_remove(path, kind, seed, entry_label)
-            elif action_code == 3:
-                self._do_compress(path, kind, seed, entry_label)
+        self._start_scan(action_code, path, kind, seed, entry_label)
 
-        except EmptySeedError as exc:
-            QMessageBox.warning(self, "Empty seed", str(exc))
-        except ContentSearchUngatedError as exc:
+    # ------------------------------------------------------------------
+    # Off-thread scan orchestration (SPEC-14)
+    # ------------------------------------------------------------------
+
+    def _start_scan(
+        self,
+        action_code: int,
+        path: str,
+        kind: EntryKind,
+        seed: str,
+        entry_label: str,
+    ) -> None:
+        """Launch a ``_ScanWorker`` on a background ``QThread``.
+
+        Shows a ``QProgressDialog`` with a Cancel button that sets the
+        worker's cooperative cancel flag.  Wires ``finished`` and ``error``
+        signals to main-thread handlers that complete the action.  The
+        thread and worker are cleaned up automatically on completion.
+        """
+        list_kwargs = self._build_list_entries_kwargs()
+
+        # Build the worker and move it to a background thread.
+        worker = _ScanWorker(path, kind, seed, list_kwargs)
+        thread = QThread(self)
+        worker.moveToThread(thread)
+
+        # ---- Progress dialog ----
+        progress_dlg = QProgressDialog(
+            tr("Scanning for {label}(s)…").replace("{label}", entry_label),
+            tr("Cancel"),
+            0,
+            0,          # maximum=0 → indeterminate busy bar
+            self,
+        )
+        progress_dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        progress_dlg.setMinimumDuration(0)  # show immediately
+        progress_dlg.setValue(0)
+
+        # Cancel button wires the worker's cooperative flag.
+        # Note: ``canceled`` (US spelling) is the PySide6 signal name.
+        progress_dlg.canceled.connect(worker.cancel)
+
+        # ---- Update progress label on each progress emission ----
+        def _on_progress(count: int, current: str) -> None:
+            progress_dlg.setLabelText(
+                tr("Scanning for {label}(s)… {count} found\n{current}").replace("{label}", entry_label).replace("{count}", str(count)).replace("{current}", current)
+            )
+
+        # SPEC-15: accumulate the skipped signal payload here so that
+        # _on_finished (which fires first) can close the progress dialog, then
+        # _on_skipped (which fires second) can forward the collected skips to
+        # _on_scan_complete.  A simple list cell acts as mutable state shared
+        # between the two closures.
+        _pending: dict = {"entries": [], "skipped_done": False, "skipped": []}
+
+        # ---- Finished: close progress dialog, then dispatch post-scan action ----
+        def _on_finished(entries: list) -> None:
+            progress_dlg.close()
+            _pending["entries"] = entries
+            # The skipped signal may arrive in the same event-loop tick or the
+            # next; we wait for it before dispatching.  In practice both signals
+            # are emitted synchronously inside run() before the thread exits, so
+            # the skipped slot fires immediately after this one in the same
+            # processEvents() sweep.
+            _pending.setdefault("finished_called", True)
+
+        # ---- Skipped: fires immediately after finished (SPEC-15) ----
+        def _on_skipped(skipped: list) -> None:
+            _cleanup()
+            self._on_scan_complete(
+                action_code, path, kind, seed, entry_label,
+                _pending["entries"], skipped,
+            )
+
+        # ---- Error: close progress dialog, surface the exception ----
+        def _on_error(exc: object) -> None:
+            progress_dlg.close()
+            _cleanup()
+            self._handle_scan_error(exc)
+
+        # ---- Thread lifecycle cleanup ----
+        def _cleanup() -> None:
+            thread.quit()
+            thread.wait()
+            # Lifecycle tidiness: drop the worker and thread once the thread has
+            # fully stopped (wait() guarantees run() returned — no use-after-free).
+            worker.deleteLater()
+            thread.deleteLater()
+
+        # Wire signals (all delivered on the main thread via the Qt event loop).
+        worker.progress.connect(_on_progress)
+        worker.finished.connect(_on_finished)
+        worker.skipped.connect(_on_skipped)  # SPEC-15
+        worker.error.connect(_on_error)
+
+        # Start thread → triggers worker.run() via started signal.
+        thread.started.connect(worker.run)
+        thread.start()
+
+        progress_dlg.exec()   # enters a local event loop; returns when closed
+
+    def _handle_scan_error(self, exc: object) -> None:
+        """Route worker error signal back to the same QMessageBox handlers as before."""
+        if isinstance(exc, EmptySeedError):
+            QMessageBox.warning(self, tr("Empty seed"), str(exc))
+        elif isinstance(exc, ContentSearchUngatedError):
             QMessageBox.warning(
                 self,
-                "Content search requires a pre-filter",
+                tr("Content search requires a pre-filter"),
                 (
-                    "Content search cannot run without at least one name, extension,\n"
-                    "or size pre-filter — it would scan every file in the tree.\n\n"
-                    "Please set a name seed, extension, or size range first, then\n"
-                    "add the content query.\n\n"
-                    f"Details: {exc}"
+                    tr(
+                        "Content search cannot run without at least one name, extension,\n"
+                        "or size pre-filter — it would scan every file in the tree.\n\n"
+                        "Please set a name seed, extension, or size range first, then\n"
+                        "add the content query.\n\n"
+                    ) + tr("Details: {details}").replace("{details}", str(exc))
                 ),
             )
-        except ValueError as exc:
-            QMessageBox.warning(self, "Invalid input", str(exc))
-        except OSError as exc:
-            QMessageBox.critical(self, "File system error", str(exc))
+        elif isinstance(exc, ValueError):
+            QMessageBox.warning(self, tr("Invalid input"), str(exc))
+        elif isinstance(exc, OSError):
+            QMessageBox.critical(self, tr("File system error"), str(exc))
+        else:
+            QMessageBox.critical(self, tr("Unexpected error"), str(exc))
+
+    def _on_scan_complete(
+        self,
+        action_code: int,
+        path: str,
+        kind: EntryKind,
+        seed: str,
+        entry_label: str,
+        entries: list[MatchEntry],
+        skipped: "list[SkippedEntry] | None" = None,
+    ) -> None:
+        """Dispatch to the correct post-scan handler on the main thread.
+
+        Flow (SPEC-19 design):
+          1. Surface skip report in status bar (SPEC-15).
+          2. Open the results view dialog showing the matched entries (SPEC-19).
+             The dialog is non-blocking for the chosen action — it opens, lets
+             the user inspect entries and properties, then returns to allow
+             Save / Remove / Compress to proceed.  It does NOT gate the action;
+             the existing safety dialogs (QMessageBox.question for Remove/Compress)
+             remain the gate.  This way Save/Remove/Compress flows are preserved.
+          3. Dispatch to the action handler (unchanged).
+        """
+        # SPEC-15: surface skip count
+        skipped = skipped or []
+        if skipped:
+            self._set_status(
+                f"{len(skipped)} path(s) skipped (permission/access errors). "
+                "Click 'Show skipped' in the results view for details."
+            )
+
+        # SPEC-19: show results view (always, for any action including Save/Remove/Compress)
+        # SPEC-18: results view now returns the subset of user-selected paths (or None
+        # when "Apply to all" was chosen or for non-selectable actions like Save).
+        selected_paths = self._show_results_view(entries, skipped, entry_label, action_code)
+
+        if action_code == 1:
+            # Save: always acts on the full set (save_listing has no only_paths);
+            # subset-apply for Save would just save the selected paths which is
+            # surprising — full-set behaviour is the least-surprising choice here.
+            self._do_save(path, kind, seed, entry_label, entries)
+        elif action_code == 2:
+            self._do_remove(path, kind, seed, entry_label, entries, only_paths=selected_paths)
+        elif action_code == 3:
+            self._do_compress(path, kind, seed, entry_label, entries, only_paths=selected_paths)
+        elif action_code == 4:
+            self._do_copy(path, kind, seed, entry_label, entries, only_paths=selected_paths)
+        elif action_code == 5:
+            self._do_move(path, kind, seed, entry_label, entries, only_paths=selected_paths)
 
     # ------------------------------------------------------------------
-    # Action helpers (called from _run)
+    # Results / properties view (SPEC-19)
     # ------------------------------------------------------------------
 
-    def _do_save(self, path: str, kind: EntryKind, seed: str, entry_label: str) -> None:
+    def _show_results_view(
+        self,
+        entries: list[MatchEntry],
+        skipped: "list[SkippedEntry]",
+        entry_label: str,
+        action_code: int = -1,
+    ) -> "list[str] | None":
+        """Open the results dialog (SPEC-19 / SPEC-18) after a scan completes.
+
+        Shows matched entries in a QTableWidget with columns:
+          Name | Path | Type | Size | Modified
+
+        SPEC-18 multi-select:
+          The table supports extended multi-row selection.  When the user has
+          rows selected and clicks "Apply to selected (N)", this method returns
+          a list of absolute path strings for those rows (excluding any
+          archive-internal entries, which cannot be acted on destructively or
+          copied/moved).  When the user clicks "Apply to all" or closes the
+          dialog without selecting an action, ``None`` is returned, preserving
+          the legacy full-set behaviour.
+
+          For the Save action (action_code == 1) only "Apply to all" is shown
+          because save_listing has no only_paths parameter.
+
+        Parameters
+        ----------
+        entries:
+            Matched entries from the scan worker.
+        skipped:
+            Entries that could not be accessed during the scan (SPEC-15).
+        entry_label:
+            "file" or "folder" for display strings.
+        action_code:
+            The selected action code from _ACTION_LABELS.  Governs which
+            apply buttons are shown.
+
+        Returns
+        -------
+        list[str] | None
+            The list of selected (non-archive-internal) absolute path strings
+            when the user chose "Apply to selected", or ``None`` for "Apply to
+            all" / close-without-action (legacy full-set behaviour).
+        """
+        # Mutable container shared by closures for the return value.
+        _result: dict = {"only_paths": None}
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(
+            tr("Results — {n} {label}(s) found").replace("{n}", str(len(entries))).replace("{label}", entry_label)
+            + (tr("  ({n} skipped)").replace("{n}", str(len(skipped))) if skipped else "")
+        )
+        dlg.resize(780, 520)
+        outer = QVBoxLayout(dlg)
+        outer.setContentsMargins(8, 8, 8, 8)
+        outer.setSpacing(6)
+
+        # Summary label
+        summary_lbl = QLabel(
+            tr("{n} {label}(s) found.").replace("{n}", str(len(entries))).replace("{label}", entry_label)
+            + (tr("  {n} path(s) skipped.").replace("{n}", str(len(skipped))) if skipped else "")
+            + "\n" + tr("(Ctrl+click or Shift+click to select multiple rows for subset action.)")
+        )
+        outer.addWidget(summary_lbl)
+
+        # Table: Name | Path | Type | Size | Modified
+        _COL_NAME = 0
+        _COL_PATH = 1
+        _COL_TYPE = 2
+        _COL_SIZE = 3
+        _COL_MODIFIED = 4
+        _HEADERS = [tr("Name"), tr("Path"), tr("Type"), tr("Size (bytes)"), tr("Modified")]
+
+        table = QTableWidget(len(entries), len(_HEADERS), dlg)
+        table.setHorizontalHeaderLabels(_HEADERS)
+        # SPEC-18: ExtendedSelection enables Ctrl+click and Shift+click multi-select
+        table.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectRows
+        )
+        from PySide6.QtWidgets import QAbstractItemView
+        table.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.horizontalHeader().setStretchLastSection(True)
+        table.horizontalHeader().setSectionResizeMode(
+            _COL_PATH, QHeaderView.ResizeMode.Stretch
+        )
+        table.verticalHeader().setVisible(False)
+
+        for row, entry in enumerate(entries):
+            p = entry.path
+            name_item = QTableWidgetItem(p.name if hasattr(p, "name") else str(p).rsplit("/", 1)[-1])
+            path_item = QTableWidgetItem(str(p))
+            # Type, Size, Modified deferred — populated on row selection via
+            # currentRowChanged; pre-fill with placeholder dashes for now.
+            table.setItem(row, _COL_NAME, name_item)
+            table.setItem(row, _COL_PATH, path_item)
+            table.setItem(row, _COL_TYPE, QTableWidgetItem(""))
+            table.setItem(row, _COL_SIZE, QTableWidgetItem(""))
+            table.setItem(row, _COL_MODIFIED, QTableWidgetItem(""))
+
+        # Lazy metadata fetch: populate Type/Size/Modified for the selected row.
+        _meta_cache: dict[int, dict] = {}
+
+        def _fetch_meta_for_row(row: int) -> dict | None:
+            if row in _meta_cache:
+                return _meta_cache[row]
+            if row < 0 or row >= len(entries):
+                return None
+            try:
+                meta = entry_metadata(str(entries[row].path))
+                _meta_cache[row] = meta
+                return meta
+            except (OSError, FileNotFoundError):
+                return None
+
+        def _on_row_changed(current_row: int) -> None:
+            meta = _fetch_meta_for_row(current_row)
+            if meta is None:
+                return
+            import datetime as _dt
+            size_str = str(meta.get("size_bytes", ""))
+            mtime = meta.get("mtime")
+            if mtime is not None:
+                try:
+                    mtime_str = _dt.datetime.fromtimestamp(
+                        mtime, tz=_dt.timezone.utc
+                    ).strftime("%Y-%m-%d %H:%M:%S UTC")
+                except (OSError, OverflowError, ValueError):
+                    mtime_str = str(mtime)
+            else:
+                mtime_str = ""
+            table.item(current_row, _COL_TYPE).setText(str(meta.get("type", "")))
+            table.item(current_row, _COL_SIZE).setText(size_str)
+            table.item(current_row, _COL_MODIFIED).setText(mtime_str)
+
+        # currentCellChanged(currentRow, currentCol, previousRow, previousCol)
+        # is the correct QTableWidget signal for row-change notification.
+        table.currentCellChanged.connect(
+            lambda cur_row, _cc, _pr, _pc: _on_row_changed(cur_row)
+        )
+        # Pre-select first row so properties are visible immediately
+        if entries:
+            table.selectRow(0)
+
+        outer.addWidget(table)
+
+        # ------------------------------------------------------------------
+        # SPEC-18: Apply-to-selected / Apply-to-all button row
+        # ------------------------------------------------------------------
+        # Helper: collect selected paths, excluding archive-internal entries.
+        def _collect_selected_paths() -> "tuple[list[str], int]":
+            """Return (non_archive_paths, excluded_archive_count)."""
+            selected_rows = {idx.row() for idx in table.selectedIndexes()}
+            non_archive: list[str] = []
+            excluded = 0
+            for row in sorted(selected_rows):
+                if row < 0 or row >= len(entries):
+                    continue
+                p = entries[row].path
+                p_str = str(p)
+                # Archive-internal entries have '!' in their path (zip-internal notation)
+                # or carry in_archive=True if the MatchEntry has that attribute.
+                is_archive_internal = (
+                    "!" in p_str
+                    or getattr(entries[row], "in_archive", False)
+                )
+                if is_archive_internal:
+                    excluded += 1
+                else:
+                    non_archive.append(p_str)
+            return non_archive, excluded
+
+        # The "Apply to selected" button (disabled when no rows are selected)
+        apply_selected_btn = QPushButton(tr("Apply to selected (0)"))
+        register_info(apply_selected_btn, "results_apply_selected")
+        apply_selected_btn.setEnabled(False)
+
+        # The "Apply to all" button (always enabled)
+        apply_all_btn = QPushButton(tr("Apply to all ({n})").replace("{n}", str(len(entries))))
+        register_info(apply_all_btn, "results_apply_all")
+        apply_all_btn.setEnabled(bool(entries))
+
+        # Keep "Apply to selected" label and enabled state in sync with selection.
+        def _update_apply_selected_btn() -> None:
+            selected_rows = {idx.row() for idx in table.selectedIndexes()}
+            n = len(selected_rows)
+            apply_selected_btn.setText(
+                tr("Apply to selected ({n})").replace("{n}", str(n))
+            )
+            apply_selected_btn.setEnabled(n > 0)
+
+        table.itemSelectionChanged.connect(_update_apply_selected_btn)
+
+        def _on_apply_selected() -> None:
+            paths, excluded = _collect_selected_paths()
+            if excluded > 0:
+                QMessageBox.information(
+                    dlg,
+                    tr("Archive-internal entries excluded"),
+                    tr(
+                        "{n} archive-internal entry/entries were excluded from the "
+                        "selection — they cannot be acted on destructively or copied/moved."
+                    ).replace("{n}", str(excluded)),
+                )
+            if not paths:
+                # All selected rows were archive-internal; nothing to act on.
+                self._set_status(
+                    tr("All selected entries are archive-internal; no action was taken.")
+                )
+                dlg.accept()
+                return
+            _result["only_paths"] = paths
+            dlg.accept()
+
+        def _on_apply_all() -> None:
+            _result["only_paths"] = None  # None = legacy full-set
+            dlg.accept()
+
+        apply_selected_btn.clicked.connect(_on_apply_selected)
+        apply_all_btn.clicked.connect(_on_apply_all)
+
+        # Button rows
+        action_btn_row = QHBoxLayout()
+        # For Save (code=1), only "Apply to all" is meaningful because save_listing
+        # has no only_paths — show only that button to avoid a misleading "Apply to
+        # selected" that would silently act on the full set anyway.
+        if action_code != 1:
+            action_btn_row.addWidget(apply_selected_btn)
+        action_btn_row.addWidget(apply_all_btn)
+        action_btn_row.addStretch()
+
+        # Properties / skipped / close row
+        btn_row = QHBoxLayout()
+
+        props_btn = QPushButton(tr("Properties"))
+        register_info(props_btn, "results_properties")
+        props_btn.setEnabled(bool(entries))
+
+        def _open_properties() -> None:
+            row = table.currentRow()
+            if row < 0 or row >= len(entries):
+                return
+            meta = _fetch_meta_for_row(row)
+            self._show_entry_properties(entries[row].path, meta)
+
+        props_btn.clicked.connect(_open_properties)
+        btn_row.addWidget(props_btn)
+
+        if skipped:
+            skip_btn = QPushButton(f"Show skipped ({len(skipped)})")
+            register_info(skip_btn, "results_show_skipped")
+
+            def _open_skipped() -> None:
+                self._show_skipped_dialog(skipped)
+
+            skip_btn.clicked.connect(_open_skipped)
+            btn_row.addWidget(skip_btn)
+
+        btn_row.addStretch()
+        close_btn = QPushButton(tr("Close"))
+        close_btn.clicked.connect(dlg.accept)
+        btn_row.addWidget(close_btn)
+
+        outer.addLayout(action_btn_row)
+        outer.addLayout(btn_row)
+        dlg.exec()
+
+        return _result["only_paths"]
+
+    def _show_entry_properties(self, path, meta: "dict | None") -> None:
+        """Open a small read-only properties dialog for *path* (SPEC-19 §2).
+
+        Shows: path, type, size, created/modified times, permission summary.
+        ``meta`` is the dict from ``entry_metadata``; when None (e.g. path is
+        archive-internal or unreadable) the dialog shows blanks gracefully.
+        """
+        dlg = QDialog(self)
+        dlg.setWindowTitle(tr("Properties — {path}").replace("{path}", str(path)))
+        dlg.resize(480, 260)
+        form = QFormLayout()
+        form.setContentsMargins(12, 12, 12, 12)
+        form.setSpacing(8)
+
+        def _row(label: str, value: str) -> None:
+            lbl = QLabel(value)
+            lbl.setWordWrap(True)
+            form.addRow(QLabel(label), lbl)
+
+        _row(tr("Path:"), str(path))
+
+        if meta:
+            import datetime as _dt
+            _row(tr("Type:"), str(meta.get("type", "")))
+            size_bytes = meta.get("size_bytes", 0)
+            _row(tr("Size:"), f"{size_bytes:,} bytes")
+            mtime = meta.get("mtime")
+            if mtime is not None:
+                try:
+                    mtime_str = _dt.datetime.fromtimestamp(
+                        mtime, tz=_dt.timezone.utc
+                    ).strftime("%Y-%m-%d %H:%M:%S UTC")
+                except (OSError, OverflowError, ValueError):
+                    mtime_str = str(mtime)
+            else:
+                mtime_str = tr("(unavailable)")
+            _row(tr("Modified:"), mtime_str)
+            _row(tr("Exists:"), str(meta.get("exists", True)))
+        else:
+            _row(tr("Metadata:"), tr("(unavailable — path may be archive-internal or unreadable)"))
+
+        outer_v = QVBoxLayout()
+        outer_v.addLayout(form)
+        ok_btn = QPushButton(tr("OK"))
+        ok_btn.clicked.connect(dlg.accept)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_row.addWidget(ok_btn)
+        outer_v.addLayout(btn_row)
+        dlg.setLayout(outer_v)
+        dlg.exec()
+
+    def _show_skipped_dialog(self, skipped: "list[SkippedEntry]") -> None:
+        """Open a read-only dialog listing skipped paths and reasons (SPEC-15)."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle(tr("Skipped paths ({n})").replace("{n}", str(len(skipped))))
+        dlg.resize(640, 400)
+        outer = QVBoxLayout(dlg)
+        outer.setContentsMargins(8, 8, 8, 8)
+        outer.setSpacing(6)
+
+        outer.addWidget(QLabel(
+            f"{len(skipped)} path(s) could not be accessed during the scan:"
+        ))
+
+        list_wgt = QListWidget()
+        list_wgt.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+        for se in skipped:
+            list_wgt.addItem(f"{se.path}  —  {se.reason}")
+        outer.addWidget(list_wgt)
+
+        close_btn = QPushButton(tr("Close"))
+        close_btn.clicked.connect(dlg.accept)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_row.addWidget(close_btn)
+        outer.addLayout(btn_row)
+        dlg.exec()
+
+    # ------------------------------------------------------------------
+    # Action helpers (called from _on_scan_complete — main thread only)
+    # ------------------------------------------------------------------
+
+    def _do_save(
+        self,
+        path: str,
+        kind: EntryKind,
+        seed: str,
+        entry_label: str,
+        entries: list[MatchEntry],
+    ) -> None:
         """Save list — low risk, no confirmation required.
 
-        Passes case_sensitive to save_listing; passes all filter params to the
-        supplementary list_entries call used for the result count.
+        Receives the pre-scanned *entries* from the worker so the save call
+        never re-scans the tree.  Passes case_sensitive to save_listing.
         """
         core_kwargs = self._build_core_kwargs()
-        list_kwargs = self._build_list_entries_kwargs()
         out_path = save_listing(path, kind, seed, **core_kwargs)
-        entries = list_entries(path, kind, seed, **list_kwargs)
         if entries:
             self._set_status(f"Directory saved to {out_path}.")
         else:
-            self._set_status(f"No {entry_label} was found — nothing was saved.")
+            self._set_status(tr("No {label} was found — nothing was saved.").replace("{label}", entry_label))
 
-    def _do_remove(self, path: str, kind: EntryKind, seed: str, entry_label: str) -> None:
+    def _do_remove(
+        self,
+        path: str,
+        kind: EntryKind,
+        seed: str,
+        entry_label: str,
+        entries: list[MatchEntry],
+        only_paths: "list[str] | None" = None,
+    ) -> None:
         """
-        Remove list — SAFETY GATE:
-          1. Dry-run to get the preview list.
-          2. Show confirmation dialog with the matched paths.
-          3. Only on Yes: call with dry_run=False, confirm=True.
+        Remove list — SAFETY GATE (SPEC-14 / SPEC-18 update):
+          1. The off-thread worker already scanned and collected matched entries
+             (scan played the role of the dry-run preview).
+          2. Show confirmation dialog with the acted-on paths (main thread).
+             When only_paths is set (subset mode), the dialog lists the subset;
+             when None, the full matched set is listed.
+          3. Only on Yes: call remove_entries(dry_run=False, confirm=True) on the
+             main thread.  Cancel of a *confirmed* mutation is out of scope; the
+             scan/preview phase is the only cancellable step.
 
+        SPEC-18: only_paths narrows the acted-on set.  None = legacy full-set.
         Passes case_sensitive to remove_entries.
         Passes versioning=True when the versioning checkbox is checked (FFX-I08).
         """
+        if not entries:
+            self._set_status(tr("No {label} was found — nothing was deleted.").replace("{label}", entry_label))
+            return
+
         core_kwargs = self._build_core_kwargs()
         versioning = self._versioning_check.isChecked()
         if versioning:
             core_kwargs["versioning"] = True
 
-        preview = remove_entries(path, kind, seed, dry_run=True, **core_kwargs)
-        if not preview.matched:
-            self._set_status(f"No {entry_label} was found — nothing was deleted.")
-            return
+        # SPEC-18: determine the display set for the confirmation dialog.
+        if only_paths is not None:
+            from pathlib import Path as _Path
+            display_paths = [_Path(p) for p in only_paths]
+            subset_note = f"\n(Subset: {len(only_paths)} of {len(entries)} matched entries)"
+        else:
+            display_paths = [e.path for e in entries]
+            subset_note = ""
 
-        preview_text = self._build_preview_text(preview.matched, entry_label)
+        preview_text = self._build_preview_text(display_paths, entry_label)
         versioning_note = (
-            "\n\nFiles will be moved to .ffe-versions/ (recoverable)."
+            tr("\n\nFiles will be moved to .ffe-versions/ (recoverable).")
             if versioning else
             ""
         )
         reply = QMessageBox.question(
             self,
-            "Confirm removal",
+            tr("Confirm removal"),
             (
-                f"About to remove "
-                f"{len(preview.matched)} {entry_label}(s):\n\n"
-                f"{preview_text}\n\nProceed?{versioning_note}"
+                tr("About to remove {n} {label}(s):{subset_note}\n\n{preview}\n\nProceed?{versioning_note}")
+                .replace("{n}", str(len(display_paths)))
+                .replace("{label}", entry_label)
+                .replace("{subset_note}", subset_note)
+                .replace("{preview}", preview_text)
+                .replace("{versioning_note}", versioning_note)
             ),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if reply == QMessageBox.StandardButton.Yes:
-            report = remove_entries(path, kind, seed, dry_run=False, confirm=True, **core_kwargs)
-            msg = f"{len(report.removed)} {entry_label}(s) removed."
+            extra: dict = {}
+            if only_paths is not None:
+                extra["only_paths"] = only_paths
+            report = remove_entries(path, kind, seed, dry_run=False, confirm=True, **core_kwargs, **extra)
+            msg = tr("{n} {label}(s) removed.").replace("{n}", str(len(report.removed))).replace("{label}", entry_label)
             if versioning and report.versioned_to:
                 msg += f"  Versions saved to: {report.versioned_to}"
             if report.failed:
@@ -1000,42 +1630,231 @@ class MainWindow(QMainWindow):
         else:
             self._set_status("Removal cancelled.")
 
-    def _do_compress(self, path: str, kind: EntryKind, seed: str, entry_label: str) -> None:
+    def _do_compress(
+        self,
+        path: str,
+        kind: EntryKind,
+        seed: str,
+        entry_label: str,
+        entries: list[MatchEntry],
+        only_paths: "list[str] | None" = None,
+    ) -> None:
         """
-        Compress list — SAFETY GATE (same pattern as _do_remove):
-          1. Dry-run to get the preview list.
-          2. Show confirmation dialog (note: originals are deleted after compression).
-          3. Only on Yes: call with dry_run=False, confirm=True.
+        Compress list — SAFETY GATE (SPEC-14 / SPEC-18 update, same pattern as _do_remove):
+          1. The off-thread worker already scanned and collected matched entries.
+          2. Show confirmation dialog on the main thread (originals deleted after
+             compression — note this clearly).
+          3. Only on Yes: call compress_entries(dry_run=False, confirm=True) on the
+             main thread.
 
-        Passes case_sensitive to compress_entries (which does not expose
-        structured filters yet).
+        SPEC-18: only_paths narrows the acted-on set.  None = legacy full-set.
+        Passes case_sensitive to compress_entries.
         """
-        core_kwargs = self._build_core_kwargs()
-        preview = compress_entries(path, kind, seed, dry_run=True, **core_kwargs)
-        if not preview.matched:
-            self._set_status(f"No {entry_label} was found — nothing was compressed.")
+        if not entries:
+            self._set_status(tr("No {label} was found — nothing was compressed.").replace("{label}", entry_label))
             return
 
-        preview_text = self._build_preview_text(preview.matched, entry_label)
+        core_kwargs = self._build_core_kwargs()
+
+        # SPEC-18: determine the display set for the confirmation dialog.
+        if only_paths is not None:
+            from pathlib import Path as _Path
+            display_paths = [_Path(p) for p in only_paths]
+            subset_note = f"\n(Subset: {len(only_paths)} of {len(entries)} matched entries)"
+        else:
+            display_paths = [e.path for e in entries]
+            subset_note = ""
+
+        preview_text = self._build_preview_text(display_paths, entry_label)
         reply = QMessageBox.question(
             self,
-            "Confirm compression",
+            tr("Confirm compression"),
             (
-                f"About to compress {len(preview.matched)} {entry_label}(s):\n\n"
-                f"{preview_text}\n\n"
-                "Originals will be deleted after compression.  Proceed?"
+                tr(
+                    "About to compress {n} {label}(s):{subset_note}\n\n"
+                    "{preview}\n\n"
+                    "Originals will be deleted after compression.  Proceed?"
+                )
+                .replace("{n}", str(len(display_paths)))
+                .replace("{label}", entry_label)
+                .replace("{subset_note}", subset_note)
+                .replace("{preview}", preview_text)
             ),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if reply == QMessageBox.StandardButton.Yes:
-            report = compress_entries(path, kind, seed, dry_run=False, confirm=True, **core_kwargs)
+            extra: dict = {}
+            if only_paths is not None:
+                extra["only_paths"] = only_paths
+            report = compress_entries(path, kind, seed, dry_run=False, confirm=True, **core_kwargs, **extra)
             msg = f"{len(report.archives)} archive(s) created."
             if report.failed:
                 msg += f"  {len(report.failed)} compression/delete(s) failed."
             self._set_status(msg)
         else:
             self._set_status("Compression cancelled.")
+
+    def _do_copy(
+        self,
+        path: str,
+        kind: EntryKind,
+        seed: str,
+        entry_label: str,
+        entries: list[MatchEntry],
+        only_paths: "list[str] | None" = None,
+    ) -> None:
+        """
+        Copy list — SAFETY GATE (SPEC-18):
+          1. Prompt for a destination directory via QFileDialog.
+          2. Dry-run copy_entries to build the preview list.
+          3. Show QMessageBox.question (default No) with preview + destination.
+          4. Only on Yes: call copy_entries(dry_run=False, confirm=True).
+
+        SPEC-18: only_paths narrows the acted-on set.  None = legacy full-set.
+        Passes case_sensitive via core_kwargs.
+        """
+        if not entries:
+            self._set_status(tr("No {label} was found — nothing was copied.").replace("{label}", entry_label))
+            return
+
+        destination = QFileDialog.getExistingDirectory(
+            self,
+            tr("FF Explorer — destination for Copy"),
+            "",
+        )
+        if not destination:
+            self._set_status(tr("Copy cancelled — no destination selected."))
+            return
+
+        core_kwargs = self._build_core_kwargs()
+        extra: dict = {}
+        if only_paths is not None:
+            extra["only_paths"] = only_paths
+
+        # SPEC-18: determine the display set for the confirmation dialog.
+        if only_paths is not None:
+            from pathlib import Path as _Path
+            display_paths = [_Path(p) for p in only_paths]
+            subset_note = f"\n(Subset: {len(only_paths)} of {len(entries)} matched entries)"
+        else:
+            display_paths = [e.path for e in entries]
+            subset_note = ""
+
+        preview_text = self._build_preview_text(display_paths, entry_label)
+        reply = QMessageBox.question(
+            self,
+            tr("Confirm copy"),
+            (
+                tr(
+                    "About to copy {n} {label}(s){subset_note}\n"
+                    "to: {destination}\n\n"
+                    "{preview}\n\nProceed?"
+                )
+                .replace("{n}", str(len(display_paths)))
+                .replace("{label}", entry_label)
+                .replace("{subset_note}", subset_note)
+                .replace("{destination}", destination)
+                .replace("{preview}", preview_text)
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            report = copy_entries(
+                path, kind, seed,
+                destination=destination,
+                dry_run=False,
+                confirm=True,
+                **core_kwargs,
+                **extra,
+            )
+            msg = tr("{n} {label}(s) copied to {destination}.").replace("{n}", str(len(report.transferred))).replace("{label}", entry_label).replace("{destination}", str(destination))
+            if report.failed:
+                msg += f"  {len(report.failed)} copy failure(s)."
+            self._set_status(msg)
+        else:
+            self._set_status("Copy cancelled.")
+
+    def _do_move(
+        self,
+        path: str,
+        kind: EntryKind,
+        seed: str,
+        entry_label: str,
+        entries: list[MatchEntry],
+        only_paths: "list[str] | None" = None,
+    ) -> None:
+        """
+        Move list — SAFETY GATE (SPEC-18, same pattern as _do_copy):
+          1. Prompt for a destination directory via QFileDialog.
+          2. Show QMessageBox.question (default No) with preview + destination.
+          3. Only on Yes: call move_entries(dry_run=False, confirm=True).
+
+        SPEC-18: only_paths narrows the acted-on set.  None = legacy full-set.
+        Passes case_sensitive via core_kwargs.
+        """
+        if not entries:
+            self._set_status(tr("No {label} was found — nothing was moved.").replace("{label}", entry_label))
+            return
+
+        destination = QFileDialog.getExistingDirectory(
+            self,
+            tr("FF Explorer — destination for Move"),
+            "",
+        )
+        if not destination:
+            self._set_status(tr("Move cancelled — no destination selected."))
+            return
+
+        core_kwargs = self._build_core_kwargs()
+        extra: dict = {}
+        if only_paths is not None:
+            extra["only_paths"] = only_paths
+
+        # SPEC-18: determine the display set for the confirmation dialog.
+        if only_paths is not None:
+            from pathlib import Path as _Path
+            display_paths = [_Path(p) for p in only_paths]
+            subset_note = f"\n(Subset: {len(only_paths)} of {len(entries)} matched entries)"
+        else:
+            display_paths = [e.path for e in entries]
+            subset_note = ""
+
+        preview_text = self._build_preview_text(display_paths, entry_label)
+        reply = QMessageBox.question(
+            self,
+            tr("Confirm move"),
+            (
+                tr(
+                    "About to move {n} {label}(s){subset_note}\n"
+                    "to: {destination}\n\n"
+                    "{preview}\n\nProceed?"
+                )
+                .replace("{n}", str(len(display_paths)))
+                .replace("{label}", entry_label)
+                .replace("{subset_note}", subset_note)
+                .replace("{destination}", destination)
+                .replace("{preview}", preview_text)
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            report = move_entries(
+                path, kind, seed,
+                destination=destination,
+                dry_run=False,
+                confirm=True,
+                **core_kwargs,
+                **extra,
+            )
+            msg = tr("{n} {label}(s) moved to {destination}.").replace("{n}", str(len(report.transferred))).replace("{label}", entry_label).replace("{destination}", str(destination))
+            if report.failed:
+                msg += f"  {len(report.failed)} move failure(s)."
+            self._set_status(msg)
+        else:
+            self._set_status("Move cancelled.")
 
     # ------------------------------------------------------------------
     # Utility
@@ -1047,8 +1866,93 @@ class MainWindow(QMainWindow):
         lines = [str(p) for p in paths[:limit]]
         text = "\n".join(lines)
         if len(paths) > limit:
-            text += f"\n  ... and {len(paths) - limit} more {entry_label}(s)."
+            text += tr("\n  ... and {n} more {label}(s).").replace("{n}", str(len(paths) - limit)).replace("{label}", entry_label)
         return text
+
+    # ------------------------------------------------------------------
+    # SPEC-20: Persisted preferences — apply / collect / save
+    # ------------------------------------------------------------------
+
+    def _apply_saved_settings(self) -> None:
+        """Restore persisted form preferences from the user config file.
+
+        Called once from ``__init__`` after the UI is built.  Gracefully
+        ignores missing or corrupt files (load_settings always returns a
+        usable dict with defaults).
+
+        Applies:
+        - last_root  → _path_edit text (only when non-empty and valid-looking)
+        - mode       → _radio_folders / _radio_files checked state
+        - action_index → _action_combo current index
+        - match_mode_index → _match_mode_combo current index
+        - case_sensitive → _case_sensitive_check
+        - min_size / max_size → size spinboxes (KB)
+        - respect_ignore → _respect_ignore_check
+        - include_hidden → _include_hidden_check
+        - search_archives → _search_archives_check
+        - versioning → _versioning_check
+        """
+        settings = load_settings()
+
+        last_root = settings.get("last_root", "")
+        if last_root:
+            self._path_edit.setText(last_root)
+
+        mode = settings.get("mode", "folders")
+        if mode == "files":
+            self._radio_files.setChecked(True)
+        else:
+            self._radio_folders.setChecked(True)
+
+        action_index = settings.get("action_index", 0)
+        if 0 <= action_index < self._action_combo.count():
+            self._action_combo.setCurrentIndex(action_index)
+
+        match_mode_index = settings.get("match_mode_index", 0)
+        if 0 <= match_mode_index < self._match_mode_combo.count():
+            self._match_mode_combo.setCurrentIndex(match_mode_index)
+
+        self._case_sensitive_check.setChecked(
+            bool(settings.get("case_sensitive", True))
+        )
+        self._min_size_spin.setValue(int(settings.get("min_size", 0)))
+        self._max_size_spin.setValue(int(settings.get("max_size", 0)))
+        self._respect_ignore_check.setChecked(
+            bool(settings.get("respect_ignore", False))
+        )
+        self._include_hidden_check.setChecked(
+            bool(settings.get("include_hidden", True))
+        )
+        self._search_archives_check.setChecked(
+            bool(settings.get("search_archives", False))
+        )
+        self._versioning_check.setChecked(
+            bool(settings.get("versioning", False))
+        )
+
+    def _collect_current_settings(self) -> dict:
+        """Collect the current form state into a preferences dict (SPEC-20).
+
+        Returns a dict suitable for passing to ``save_settings``.
+        """
+        path_text = self._path_edit.text()
+        last_root = "" if path_text == _PLACEHOLDER_PATH else path_text
+
+        mode = "files" if self._radio_files.isChecked() else "folders"
+
+        return {
+            "last_root": last_root,
+            "mode": mode,
+            "action_index": self._action_combo.currentIndex(),
+            "match_mode_index": self._match_mode_combo.currentIndex(),
+            "case_sensitive": self._case_sensitive_check.isChecked(),
+            "min_size": self._min_size_spin.value(),
+            "max_size": self._max_size_spin.value(),
+            "respect_ignore": self._respect_ignore_check.isChecked(),
+            "include_hidden": self._include_hidden_check.isChecked(),
+            "search_archives": self._search_archives_check.isChecked(),
+            "versioning": self._versioning_check.isChecked(),
+        }
 
     # ------------------------------------------------------------------
     # Settings / theme
@@ -1085,7 +1989,7 @@ class MainWindow(QMainWindow):
         """
         path_text = self._path_edit.text()
         if path_text == _PLACEHOLDER_PATH or not path_text.strip():
-            QMessageBox.warning(self, "Warning!", "Select a root path first.")
+            QMessageBox.warning(self, tr("Warning!"), tr("Select a root path first."))
             return
 
         from ff_explorer.core import largest_entries
@@ -1094,11 +1998,11 @@ class MainWindow(QMainWindow):
         try:
             entries = largest_entries(path_text, top_n=50)
         except (FileNotFoundError, ValueError) as exc:
-            QMessageBox.warning(self, "Disk Usage", str(exc))
+            QMessageBox.warning(self, tr("Disk Usage"), str(exc))
             return
 
         dlg = QDialog(self)
-        dlg.setWindowTitle("Disk Usage — Largest Files")
+        dlg.setWindowTitle(tr("Disk Usage — Largest Files"))
         dlg.resize(680, 520)
         layout = QVBoxLayout(dlg)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -1122,24 +2026,24 @@ class MainWindow(QMainWindow):
         """
         path_text = self._path_edit.text()
         if path_text == _PLACEHOLDER_PATH or not path_text.strip():
-            QMessageBox.warning(self, "Warning!", "Select a root path first.")
+            QMessageBox.warning(self, tr("Warning!"), tr("Select a root path first."))
             return
 
         try:
             groups = find_duplicates(path_text)
         except (ValueError, OSError) as exc:
-            QMessageBox.warning(self, "Find Duplicates", str(exc))
+            QMessageBox.warning(self, tr("Find Duplicates"), str(exc))
             return
 
         dlg = QDialog(self)
-        dlg.setWindowTitle("Find Duplicates")
+        dlg.setWindowTitle(tr("Find Duplicates"))
         dlg.resize(700, 480)
         outer_layout = QVBoxLayout(dlg)
         outer_layout.setContentsMargins(8, 8, 8, 8)
         outer_layout.setSpacing(6)
 
         if not groups:
-            outer_layout.addWidget(QLabel("No duplicate files found."))
+            outer_layout.addWidget(QLabel(tr("No duplicate files found.")))
         else:
             total_wasted = sum(g.size * (len(g.paths) - 1) for g in groups)
             from ff_explorer.gui.treemap_view import _fmt_size
@@ -1179,29 +2083,29 @@ class MainWindow(QMainWindow):
         """
         path_text = self._path_edit.text()
         if path_text == _PLACEHOLDER_PATH or not path_text.strip():
-            QMessageBox.warning(self, "Warning!", "Select a root path first.")
+            QMessageBox.warning(self, tr("Warning!"), tr("Select a root path first."))
             return
 
         seed = self._seed_edit.text()
         if not seed.strip():
             QMessageBox.warning(
-                self, "Batch Rename", "Set a name seed to select files to rename."
+                self, tr("Batch Rename"), tr("Set a name seed to select files to rename.")
             )
             return
 
         # ---- Rule definition dialog ----
         rule_dlg = QDialog(self)
-        rule_dlg.setWindowTitle("Batch Rename — Define Rule")
+        rule_dlg.setWindowTitle(tr("Batch Rename — Define Rule"))
         rule_dlg.resize(420, 180)
         form = QFormLayout()
 
         find_edit = QLineEdit()
-        find_edit.setPlaceholderText("Text to find in filename")
+        find_edit.setPlaceholderText(tr("Text to find in filename"))
         replace_edit = QLineEdit()
-        replace_edit.setPlaceholderText("Replacement text (empty = delete)")
+        replace_edit.setPlaceholderText(tr("Replacement text (empty = delete)"))
 
-        form.addRow("Find:", find_edit)
-        form.addRow("Replace with:", replace_edit)
+        form.addRow(tr("Find:"), find_edit)
+        form.addRow(tr("Replace with:"), replace_edit)
 
         btns = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -1221,7 +2125,7 @@ class MainWindow(QMainWindow):
         replace_text = replace_edit.text()
 
         if not find_text:
-            QMessageBox.warning(self, "Batch Rename", "Find text must not be empty.")
+            QMessageBox.warning(self, tr("Batch Rename"), tr("Find text must not be empty."))
             return
 
         rule = RenameRule(kind="find_replace", params={"find": find_text, "replace": replace_text})
@@ -1236,22 +2140,24 @@ class MainWindow(QMainWindow):
                 **core_kwargs,
             )
         except EmptySeedError as exc:
-            QMessageBox.warning(self, "Batch Rename", str(exc))
+            QMessageBox.warning(self, tr("Batch Rename"), str(exc))
             return
         except ValueError as exc:
-            QMessageBox.warning(self, "Batch Rename", str(exc))
+            QMessageBox.warning(self, tr("Batch Rename"), str(exc))
             return
 
         if not preview_report.mapping:
-            self._set_status("Batch rename: no matching entries found.")
+            self._set_status(tr("Batch rename: no matching entries found."))
             return
 
         if preview_report.collisions:
             collision_text = "\n".join(preview_report.collisions[:10])
             QMessageBox.warning(
                 self,
-                "Batch Rename — Collision Detected",
-                f"The rename cannot proceed due to collisions:\n\n{collision_text}",
+                tr("Batch Rename — Collision Detected"),
+                tr("The rename cannot proceed due to collisions:\n\n{text}").replace(
+                    "{text}", collision_text
+                ),
             )
             return
 
@@ -1267,16 +2173,17 @@ class MainWindow(QMainWindow):
 
         reply = QMessageBox.question(
             self,
-            "Confirm Batch Rename",
+            tr("Confirm Batch Rename"),
             (
-                f"About to rename {len(preview_report.mapping)} file(s):\n\n"
-                f"{preview_text}\n\nApply?"
+                tr("About to rename {n} file(s):\n\n{preview}\n\nApply?")
+                .replace("{n}", str(len(preview_report.mapping)))
+                .replace("{preview}", preview_text)
             ),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if reply != QMessageBox.StandardButton.Yes:
-            self._set_status("Batch rename cancelled.")
+            self._set_status(tr("Batch rename cancelled."))
             return
 
         try:
@@ -1288,10 +2195,10 @@ class MainWindow(QMainWindow):
                 **core_kwargs,
             )
         except (EmptySeedError, ValueError) as exc:
-            QMessageBox.warning(self, "Batch Rename", str(exc))
+            QMessageBox.warning(self, tr("Batch Rename"), str(exc))
             return
         except OSError as exc:
-            QMessageBox.critical(self, "Batch Rename — File system error", str(exc))
+            QMessageBox.critical(self, tr("Batch Rename — File system error"), str(exc))
             return
 
         msg = f"Batch rename: {len(live_report.renamed)} file(s) renamed."
@@ -1308,7 +2215,7 @@ class MainWindow(QMainWindow):
     def _save_preset(self) -> None:
         """Save the current form state as a named preset (FFX-I03)."""
         name, ok = QInputDialog.getText(
-            self, "Save Preset", "Preset name:"
+            self, tr("Save Preset"), tr("Preset name:")
         )
         if not ok or not name.strip():
             return
@@ -1343,20 +2250,20 @@ class MainWindow(QMainWindow):
             save_preset(preset)
             self._set_status(f"Preset '{name.strip()}' saved.")
         except ValueError as exc:
-            QMessageBox.warning(self, "Save Preset", str(exc))
+            QMessageBox.warning(self, tr("Save Preset"), str(exc))
 
     def _load_preset(self) -> None:
         """Load a saved preset back into the form (FFX-I03)."""
         presets = list_presets()
         if not presets:
             QMessageBox.information(
-                self, "Load Preset", "No saved presets found."
+                self, tr("Load Preset"), tr("No saved presets found.")
             )
             return
 
         names = [p.name for p in presets]
         name, ok = QInputDialog.getItem(
-            self, "Load Preset", "Select preset:", names, 0, False
+            self, tr("Load Preset"), tr("Select preset:"), names, 0, False
         )
         if not ok or not name:
             return
@@ -1364,7 +2271,7 @@ class MainWindow(QMainWindow):
         try:
             preset = get_preset(name)
         except KeyError as exc:
-            QMessageBox.warning(self, "Load Preset", str(exc))
+            QMessageBox.warning(self, tr("Load Preset"), str(exc))
             return
 
         # Apply preset back into form fields
@@ -1431,7 +2338,7 @@ class MainWindow(QMainWindow):
             self._live_index_check.setChecked(False)
             self._live_index_check.blockSignals(False)
             QMessageBox.warning(
-                self, "Live Index", "Select a root path before enabling live indexing."
+                self, tr("Live Index"), tr("Select a root path before enabling live indexing.")
             )
             return
 
@@ -1445,14 +2352,14 @@ class MainWindow(QMainWindow):
                 self._live_index_check.blockSignals(False)
                 QMessageBox.warning(
                     self,
-                    "Live Index — dependency missing",
-                    f"Real-time indexing requires 'watchdog'.\n\n{exc}",
+                    tr("Live Index — dependency missing"),
+                    tr("Real-time indexing requires 'watchdog'.\n\n") + str(exc),
                 )
             except (ValueError, OSError) as exc:
                 self._live_index_check.blockSignals(True)
                 self._live_index_check.setChecked(False)
                 self._live_index_check.blockSignals(False)
-                QMessageBox.warning(self, "Live Index", str(exc))
+                QMessageBox.warning(self, tr("Live Index"), str(exc))
         else:
             try:
                 IndexManager.stop_index(path_text)
@@ -1474,6 +2381,7 @@ class MainWindow(QMainWindow):
 
         Stops the live index observer (FFX-I10) if active so no background
         thread leaks after the window is closed.
+        Persists current form preferences (SPEC-20) on every close.
         """
         # FFX-I10: stop any active live index observer for the current root.
         path_text = self._path_edit.text()
@@ -1487,8 +2395,15 @@ class MainWindow(QMainWindow):
                 IndexManager.stop_index(path_text)
             except Exception:
                 pass  # best-effort; never block close
+
+        # SPEC-20: persist current form preferences on close.
+        try:
+            save_settings(self._collect_current_settings())
+        except Exception:  # noqa: BLE001
+            pass  # best-effort; never block close
+
         gc.collect()
-        event.accept()
+        super().closeEvent(event)
 
     # ------------------------------------------------------------------
     # Keyboard shortcut: Enter → Run  (handled via returnPressed on seed_edit

@@ -7,6 +7,10 @@ Fires on Edit/Write. BLOCKS (exit 2) if the target is a .pyw file OR the new con
 `import tkinter` / `from tkinter ...` anywhere in the repo. Otherwise exits 0.
 
 Non-fatal on its own errors (exit 0). Block protocol: exit 2 + reason on stderr.
+
+## Principles Applied
+P2 Full Determinism, P4 Consistency (guards the completed Tk->PySide6 migration against
+Tk reintroduction), P8 Principles Inheritance, P11 Programmatic Determinism (hook IS the harness).
 """
 from __future__ import annotations
 

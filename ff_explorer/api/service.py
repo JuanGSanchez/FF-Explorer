@@ -25,23 +25,31 @@ when available (see ``ff_explorer.core.remove_entries`` docstring).
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Iterator
 
 from ff_explorer.core import (
     EntryKind,
     MatchEntry,
+    SkippedEntry,
+    ListingResult,
     SizedEntry,
     RemovalReport,
     CompressionReport,
+    TransferReport,
     EmptySeedError,
     InvalidRegexError,
     ContentSearchUngatedError,
     list_entries as _core_list_entries,
+    iter_entries as _core_iter_entries,
+    list_entries_with_report as _core_list_entries_with_report,
     entry_metadata as _core_entry_metadata,
     save_listing as _core_save_listing,
     remove_entries as _core_remove_entries,
     compress_entries as _core_compress_entries,
+    copy_entries as _core_copy_entries,
+    move_entries as _core_move_entries,
     largest_entries as _core_largest_entries,
 )
 from ff_explorer.content_search import CONTENT_MAX_BYTES
@@ -63,12 +71,18 @@ from ff_explorer.rename import (
 )
 from ff_explorer.index import IndexManager as _IndexManager
 
+logger = logging.getLogger(__name__)
+
 __all__ = [
     "list_entries",
+    "iter_entries",
+    "list_entries_with_report",
     "entry_metadata",
     "save_listing",
     "remove_entries",
     "compress_entries",
+    "copy_entries",
+    "move_entries",
     "largest_entries",
     "save_preset",
     "list_presets",
@@ -81,9 +95,12 @@ __all__ = [
     "index_status",
     "EntryKind",
     "MatchEntry",
+    "SkippedEntry",
+    "ListingResult",
     "SizedEntry",
     "RemovalReport",
     "CompressionReport",
+    "TransferReport",
     "EmptySeedError",
     "InvalidRegexError",
     "ContentSearchUngatedError",
@@ -116,6 +133,7 @@ def list_entries(
     search_archives: bool = False,
     content_query: str | None = None,
     content_max_bytes: int = CONTENT_MAX_BYTES,
+    include_hidden: bool = True,
 ) -> list[MatchEntry]:
     """Return every file/folder entry under *path* whose name matches *name_seed*.
 
@@ -175,6 +193,11 @@ def list_entries(
         Maximum file size in bytes scanned for content matching.  Default
         :data:`CONTENT_MAX_BYTES` (10 MiB).  Ignored when *content_query*
         is ``None``.
+    include_hidden:
+        When ``True`` (default), hidden and system entries are included —
+        identical to pre-SPEC-17 behaviour.  When ``False``, hidden/system
+        entries are excluded (POSIX dotfiles; Windows FILE_ATTRIBUTE_HIDDEN /
+        FILE_ATTRIBUTE_SYSTEM).  Default ``True`` — no regression.
 
     Returns
     -------
@@ -210,6 +233,140 @@ def list_entries(
         search_archives=search_archives,
         content_query=content_query,
         content_max_bytes=content_max_bytes,
+        include_hidden=include_hidden,
+    )
+
+
+def iter_entries(
+    path: str,
+    kind: int,
+    name_seed: str = "",
+    *,
+    case_sensitive: bool = True,
+    match_mode: str = "substring",
+    min_size: int | None = None,
+    max_size: int | None = None,
+    modified_after: float | None = None,
+    modified_before: float | None = None,
+    extensions: Iterable[str] | None = None,
+    respect_ignore: bool = False,
+    ignore_globs: list[str] | None = None,
+    search_archives: bool = False,
+    content_query: str | None = None,
+    content_max_bytes: int = CONTENT_MAX_BYTES,
+    include_hidden: bool = True,
+    _skipped: "list[SkippedEntry] | None" = None,
+) -> "Iterator[MatchEntry]":
+    """Streaming generator variant of :func:`list_entries`.
+
+    Yields each :class:`MatchEntry` as the walk discovers it without
+    accumulating a full results list.  Thin passthrough to
+    :func:`ff_explorer.core.iter_entries`.
+
+    Parameters
+    ----------
+    path, kind, name_seed, case_sensitive, match_mode, min_size, max_size,
+    modified_after, modified_before, extensions, respect_ignore, ignore_globs,
+    search_archives, content_query, content_max_bytes, include_hidden:
+        Same semantics as :func:`list_entries`.
+    _skipped:
+        Optional list; mutated in-place with :class:`SkippedEntry` objects for
+        every path skipped due to a recoverable error.  ``None`` = errors are
+        only logged.
+
+    Yields
+    ------
+    MatchEntry
+        One per matching entry in ``os.walk`` top-down order.
+
+    Raises
+    ------
+    ValueError, InvalidRegexError, ContentSearchUngatedError:
+        Same conditions as :func:`list_entries`.
+    """
+    return _core_iter_entries(
+        path,
+        EntryKind(int(kind)),
+        name_seed,
+        case_sensitive=case_sensitive,
+        match_mode=match_mode,
+        min_size=min_size,
+        max_size=max_size,
+        modified_after=modified_after,
+        modified_before=modified_before,
+        extensions=extensions,
+        respect_ignore=respect_ignore,
+        ignore_globs=ignore_globs,
+        search_archives=search_archives,
+        content_query=content_query,
+        content_max_bytes=content_max_bytes,
+        include_hidden=include_hidden,
+        _skipped=_skipped,
+    )
+
+
+def list_entries_with_report(
+    path: str,
+    kind: int,
+    name_seed: str = "",
+    *,
+    case_sensitive: bool = True,
+    match_mode: str = "substring",
+    min_size: int | None = None,
+    max_size: int | None = None,
+    modified_after: float | None = None,
+    modified_before: float | None = None,
+    extensions: Iterable[str] | None = None,
+    respect_ignore: bool = False,
+    ignore_globs: list[str] | None = None,
+    search_archives: bool = False,
+    content_query: str | None = None,
+    content_max_bytes: int = CONTENT_MAX_BYTES,
+    include_hidden: bool = True,
+) -> ListingResult:
+    """Walk *path* and return matched entries together with a skip report.
+
+    Thin passthrough to :func:`ff_explorer.core.list_entries_with_report`.
+    Identical to :func:`list_entries` except the return value bundles entries
+    with a :class:`SkippedEntry` list for every path skipped due to a
+    recoverable error.  The walk always completes.
+
+    Parameters
+    ----------
+    path, kind, name_seed, case_sensitive, match_mode, min_size, max_size,
+    modified_after, modified_before, extensions, respect_ignore, ignore_globs,
+    search_archives, content_query, content_max_bytes, include_hidden:
+        Same semantics as :func:`list_entries`.
+
+    Returns
+    -------
+    ListingResult
+        ``.entries`` — matched :class:`MatchEntry` objects.
+        ``.skipped`` — :class:`SkippedEntry` objects for paths that could not
+        be accessed.  Empty list when no errors occurred.
+
+    Raises
+    ------
+    ValueError, InvalidRegexError, ContentSearchUngatedError:
+        Same conditions as :func:`list_entries`.
+    """
+    return _core_list_entries_with_report(
+        path,
+        EntryKind(int(kind)),
+        name_seed,
+        case_sensitive=case_sensitive,
+        match_mode=match_mode,
+        min_size=min_size,
+        max_size=max_size,
+        modified_after=modified_after,
+        modified_before=modified_before,
+        extensions=extensions,
+        respect_ignore=respect_ignore,
+        ignore_globs=ignore_globs,
+        search_archives=search_archives,
+        content_query=content_query,
+        content_max_bytes=content_max_bytes,
+        include_hidden=include_hidden,
     )
 
 
@@ -278,6 +435,7 @@ def remove_entries(
     dry_run: bool = True,
     confirm: bool = False,
     versioning: bool = False,
+    only_paths: Iterable[str] | None = None,
 ) -> RemovalReport:
     """Walk *path*, filter by *name_seed*, and remove matched entries.
 
@@ -314,11 +472,15 @@ def remove_entries(
         When ``True``, move matched items into a timestamped recovery archive
         under ``<path>/.ffe-versions/`` instead of the OS recycle bin.
         Default ``False`` — preserves existing recycle-bin behaviour.
+    only_paths:
+        Optional explicit subset restriction (SPEC-18 multi-select).  When
+        provided, only the intersection of the seed-matched set and
+        *only_paths* is acted on.  ``None`` (default) = full matched set.
 
     Returns
     -------
     RemovalReport
-        ``.matched``      — all paths that matched the filter.
+        ``.matched``      — paths acted on (after optional only_paths intersection).
         ``.removed``      — paths successfully removed (empty on dry-run).
         ``.failed``       — ``[(path, error_message), ...]``.
         ``.dry_run``      — mirrors the *dry_run* parameter.
@@ -330,8 +492,7 @@ def remove_entries(
     EmptySeedError
         If *name_seed* is blank or whitespace-only.
     ValueError
-        If *dry_run* is False but *confirm* is also False, or *path* is
-        not a directory.
+        If the gate conditions are not met, or *path* is not a directory.
     """
     return _core_remove_entries(
         path, EntryKind(int(kind)), name_seed,
@@ -339,6 +500,7 @@ def remove_entries(
         dry_run=dry_run,
         confirm=confirm,
         versioning=versioning,
+        only_paths=only_paths,
     )
 
 
@@ -350,6 +512,7 @@ def compress_entries(
     case_sensitive: bool = True,
     dry_run: bool = True,
     confirm: bool = False,
+    only_paths: Iterable[str] | None = None,
 ) -> CompressionReport:
     """Walk *path*, filter by *name_seed*, compress matched entries into
     zip archive(s), then permanently delete the originals.
@@ -375,11 +538,15 @@ def compress_entries(
     ----------
     path, kind, name_seed, case_sensitive, dry_run, confirm:
         Same semantics as :func:`remove_entries`.
+    only_paths:
+        Optional explicit subset restriction (SPEC-18 multi-select).  Same
+        semantics as in :func:`remove_entries`.  ``None`` (default) = full
+        matched set.
 
     Returns
     -------
     CompressionReport
-        ``.matched``     — paths that matched the filter.
+        ``.matched``     — paths acted on (after optional only_paths intersection).
         ``.archives``    — zip archive paths created (empty on dry-run).
         ``.failed``      — ``[(path, error_message), ...]``.
         ``.dry_run``     — mirrors the *dry_run* parameter.
@@ -390,13 +557,174 @@ def compress_entries(
     EmptySeedError
         If *name_seed* is blank or whitespace-only.
     ValueError
-        If *dry_run=False* but *confirm=False*, or *path* is not a directory.
+        If the gate conditions are not met, or *path* is not a directory.
     """
     return _core_compress_entries(
         path, EntryKind(int(kind)), name_seed,
         case_sensitive=case_sensitive,
         dry_run=dry_run,
         confirm=confirm,
+        only_paths=only_paths,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Bulk copy / move — SPEC-18 (gated; default dry_run=True)
+# ---------------------------------------------------------------------------
+
+def copy_entries(
+    path: str,
+    kind: int,
+    name_seed: str,
+    *,
+    destination: str,
+    case_sensitive: bool = True,
+    match_mode: str = "substring",
+    dry_run: bool = True,
+    confirm: bool = False,
+    only_paths: Iterable[str] | None = None,
+) -> TransferReport:
+    """Walk *path*, filter by *name_seed*, and copy matched entries to
+    *destination*.
+
+    Thin passthrough to :func:`ff_explorer.core.copy_entries`.
+
+    Safety guards (identical to :func:`remove_entries`):
+
+    1. *name_seed* must be non-empty — ``EmptySeedError`` otherwise.
+    2. *dry_run* defaults to ``True`` (safe preview; nothing is copied).
+    3. Passing *confirm* as ``True`` alongside *dry_run* as ``False`` is
+       the only way to actually copy.
+
+    Parameters
+    ----------
+    path:
+        Root directory to walk.
+    kind:
+        ``0`` — FOLDERS, ``1`` — FILES.
+    name_seed:
+        Non-empty filter pattern.  Blank raises ``EmptySeedError``.
+    destination:
+        Target directory (created with parents if absent).  Must not be
+        inside *path*.
+    case_sensitive:
+        Case-sensitive name matching (default ``True``).
+    match_mode:
+        ``"substring"`` (default), ``"glob"``, or ``"regex"``.
+    dry_run:
+        When ``True`` (default), return the preview list without copying.
+    confirm:
+        Explicit opt-in token (default ``False``).
+    only_paths:
+        Optional explicit subset restriction (SPEC-18 multi-select).  Same
+        semantics as in :func:`remove_entries`.  ``None`` (default) = full
+        matched set.
+
+    Returns
+    -------
+    TransferReport
+        ``.kind``        — ``"copy"``.
+        ``.matched``     — paths acted on (after optional only_paths intersection).
+        ``.transferred`` — paths successfully copied (empty on dry-run).
+        ``.failed``      — ``[(source_path, error_message), ...]``.
+        ``.dry_run``     — mirrors the *dry_run* parameter.
+        ``.destination`` — destination directory (str), or ``None`` on
+                           dry-run.
+
+    Raises
+    ------
+    EmptySeedError
+        If *name_seed* is blank or whitespace-only.
+    ValueError
+        If the gate conditions are not met, *path* is not a directory, or
+        *destination* is inside *path*.
+    """
+    return _core_copy_entries(
+        path, EntryKind(int(kind)), name_seed,
+        destination=destination,
+        case_sensitive=case_sensitive,
+        match_mode=match_mode,
+        dry_run=dry_run,
+        confirm=confirm,
+        only_paths=only_paths,
+    )
+
+
+def move_entries(
+    path: str,
+    kind: int,
+    name_seed: str,
+    *,
+    destination: str,
+    case_sensitive: bool = True,
+    match_mode: str = "substring",
+    dry_run: bool = True,
+    confirm: bool = False,
+    only_paths: Iterable[str] | None = None,
+) -> TransferReport:
+    """Walk *path*, filter by *name_seed*, and move matched entries to
+    *destination*.
+
+    Thin passthrough to :func:`ff_explorer.core.move_entries`.
+
+    Safety guards (identical to :func:`remove_entries`):
+
+    1. *name_seed* must be non-empty — ``EmptySeedError`` otherwise.
+    2. *dry_run* defaults to ``True`` (safe preview; nothing is moved).
+    3. Passing *confirm* as ``True`` alongside *dry_run* as ``False`` is
+       the only way to actually move.
+
+    Parameters
+    ----------
+    path:
+        Root directory to walk.
+    kind:
+        ``0`` — FOLDERS, ``1`` — FILES.
+    name_seed:
+        Non-empty filter pattern.  Blank raises ``EmptySeedError``.
+    destination:
+        Target directory (created with parents if absent).  Must not be
+        inside *path*.
+    case_sensitive:
+        Case-sensitive name matching (default ``True``).
+    match_mode:
+        ``"substring"`` (default), ``"glob"``, or ``"regex"``.
+    dry_run:
+        When ``True`` (default), return the preview list without moving.
+    confirm:
+        Explicit opt-in token (default ``False``).
+    only_paths:
+        Optional explicit subset restriction (SPEC-18 multi-select).  Same
+        semantics as in :func:`remove_entries`.  ``None`` (default) = full
+        matched set.
+
+    Returns
+    -------
+    TransferReport
+        ``.kind``        — ``"move"``.
+        ``.matched``     — paths acted on (after optional only_paths intersection).
+        ``.transferred`` — paths successfully moved (empty on dry-run).
+        ``.failed``      — ``[(source_path, error_message), ...]``.
+        ``.dry_run``     — mirrors the *dry_run* parameter.
+        ``.destination`` — destination directory (str), or ``None`` on
+                           dry-run.
+
+    Raises
+    ------
+    EmptySeedError
+        If *name_seed* is blank or whitespace-only.
+    ValueError
+        If the gate conditions are not met, *path* is not a directory, or
+        *destination* is inside *path*.
+    """
+    return _core_move_entries(
+        path, EntryKind(int(kind)), name_seed,
+        destination=destination,
+        case_sensitive=case_sensitive,
+        match_mode=match_mode,
+        dry_run=dry_run,
+        confirm=confirm,
+        only_paths=only_paths,
     )
 
 
