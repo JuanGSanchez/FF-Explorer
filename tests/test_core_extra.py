@@ -1809,3 +1809,277 @@ class TestMoveEntriesGate:
             move_entries(str(src), EntryKind.FILES, "alpha",
                          destination=str(dest_inside),
                          dry_run=False, confirm=True)
+
+
+# ===========================================================================
+# only_paths subset restriction (SPEC-18 multi-select)
+# ===========================================================================
+
+class TestOnlyPathsRemove:
+    """remove_entries with only_paths: subset deletion, no-widen, gate preserved."""
+
+    def test_only_paths_restricts_deletion(self, tmp_path):
+        """Only the intersected file is removed; the other seed-match survives."""
+        (tmp_path / "delete_me_a.txt").write_text("a")
+        (tmp_path / "delete_me_b.txt").write_text("b")
+
+        # Pass only the 'a' file as the subset
+        a_path = str(tmp_path / "delete_me_a.txt")
+        report = remove_entries(
+            tmp_path, EntryKind.FILES, "delete_me",
+            only_paths=[a_path],
+            dry_run=False, confirm=True,
+        )
+        assert not (tmp_path / "delete_me_a.txt").exists(), "a must be removed"
+        assert (tmp_path / "delete_me_b.txt").exists(), "b must survive"
+        matched_names = {Path(p).name for p in report.matched}
+        assert matched_names == {"delete_me_a.txt"}
+
+    def test_only_paths_dry_run_preview_reflects_subset(self, tmp_path):
+        """Dry-run preview shows the intersected subset, not the full match."""
+        (tmp_path / "delete_me_a.txt").write_text("a")
+        (tmp_path / "delete_me_b.txt").write_text("b")
+
+        a_path = str(tmp_path / "delete_me_a.txt")
+        report = remove_entries(
+            tmp_path, EntryKind.FILES, "delete_me",
+            only_paths=[a_path],
+            dry_run=True,
+        )
+        assert report.dry_run is True
+        matched_names = {Path(p).name for p in report.matched}
+        assert matched_names == {"delete_me_a.txt"}
+        assert "delete_me_b.txt" not in matched_names
+        # Nothing deleted
+        assert (tmp_path / "delete_me_a.txt").exists()
+        assert (tmp_path / "delete_me_b.txt").exists()
+
+    def test_only_paths_cannot_widen_action_set(self, tmp_path):
+        """A path in only_paths that is NOT in the seed-match is silently ignored."""
+        (tmp_path / "delete_me.txt").write_text("x")
+        (tmp_path / "keep.txt").write_text("y")
+
+        # only_paths contains 'keep.txt' which does NOT match seed "delete_me"
+        keep_path = str(tmp_path / "keep.txt")
+        report = remove_entries(
+            tmp_path, EntryKind.FILES, "delete_me",
+            only_paths=[keep_path],
+            dry_run=False, confirm=True,
+        )
+        # keep.txt must NOT have been removed (only_paths cannot widen)
+        assert (tmp_path / "keep.txt").exists(), "keep.txt must not be acted on"
+        # matched set is the intersection — empty since keep.txt not in seed-match
+        assert report.matched == []
+
+    def test_only_paths_none_is_full_set_regression(self, tmp_path):
+        """only_paths=None (default) acts on the full matched set — no regression."""
+        (tmp_path / "delete_me_a.txt").write_text("a")
+        (tmp_path / "delete_me_b.txt").write_text("b")
+
+        report = remove_entries(
+            tmp_path, EntryKind.FILES, "delete_me",
+            only_paths=None,
+            dry_run=True,
+        )
+        matched_names = {Path(p).name for p in report.matched}
+        assert "delete_me_a.txt" in matched_names
+        assert "delete_me_b.txt" in matched_names
+
+    def test_empty_seed_rejected_even_with_only_paths(self, tmp_path):
+        """The empty-seed gate fires before only_paths is considered."""
+        (tmp_path / "file.txt").write_text("x")
+        with pytest.raises(EmptySeedError):
+            remove_entries(
+                tmp_path, EntryKind.FILES, "",
+                only_paths=[str(tmp_path / "file.txt")],
+            )
+
+
+class TestOnlyPathsCompress:
+    """compress_entries with only_paths: subset compressed, rest untouched."""
+
+    def test_only_paths_restricts_compression(self, tmp_path):
+        """Only the selected file is compressed; the other seed-match survives."""
+        (tmp_path / "zip_me_a.txt").write_text("a" * 100)
+        (tmp_path / "zip_me_b.txt").write_text("b" * 100)
+
+        a_path = str(tmp_path / "zip_me_a.txt")
+        report = compress_entries(
+            tmp_path, EntryKind.FILES, "zip_me",
+            only_paths=[a_path],
+            dry_run=False, confirm=True,
+        )
+        # Original a deleted (compress removes originals); b survives untouched
+        assert not (tmp_path / "zip_me_a.txt").exists()
+        assert (tmp_path / "zip_me_b.txt").exists()
+        matched_names = {Path(p).name for p in report.matched}
+        assert matched_names == {"zip_me_a.txt"}
+
+    def test_only_paths_dry_run_preview_reflects_subset(self, tmp_path):
+        """Dry-run preview shows intersected subset for compress."""
+        (tmp_path / "zip_me_a.txt").write_text("a")
+        (tmp_path / "zip_me_b.txt").write_text("b")
+
+        a_path = str(tmp_path / "zip_me_a.txt")
+        report = compress_entries(
+            tmp_path, EntryKind.FILES, "zip_me",
+            only_paths=[a_path],
+            dry_run=True,
+        )
+        matched_names = {Path(p).name for p in report.matched}
+        assert matched_names == {"zip_me_a.txt"}
+        assert "zip_me_b.txt" not in matched_names
+
+    def test_empty_seed_rejected_even_with_only_paths(self, tmp_path):
+        """The empty-seed gate fires before only_paths is considered."""
+        (tmp_path / "file.txt").write_text("x")
+        with pytest.raises(EmptySeedError):
+            compress_entries(
+                tmp_path, EntryKind.FILES, "   ",
+                only_paths=[str(tmp_path / "file.txt")],
+            )
+
+
+class TestOnlyPathsCopy:
+    """copy_entries with only_paths: only selected entries transferred."""
+
+    def test_only_paths_restricts_copy(self, tmp_path):
+        """Only the selected file is copied; the other seed-match is not."""
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "alpha.txt").write_text("a")
+        (src / "beta.txt").write_text("b")
+        dest = tmp_path / "dest"
+
+        a_path = str(src / "alpha.txt")
+        report = copy_entries(
+            str(src), EntryKind.FILES, ".txt",
+            destination=str(dest),
+            only_paths=[a_path],
+            dry_run=False, confirm=True,
+        )
+        assert (dest / "alpha.txt").exists()
+        assert not (dest / "beta.txt").exists()
+        matched_names = {Path(p).name for p in report.matched}
+        assert matched_names == {"alpha.txt"}
+
+    def test_only_paths_cannot_widen_copy(self, tmp_path):
+        """A path not in seed-match is not copied."""
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "alpha.txt").write_text("a")
+        (src / "gamma.log").write_text("g")
+        dest = tmp_path / "dest"
+
+        # only_paths points to gamma.log which does NOT match seed ".txt"
+        gamma_path = str(src / "gamma.log")
+        report = copy_entries(
+            str(src), EntryKind.FILES, ".txt",
+            destination=str(dest),
+            only_paths=[gamma_path],
+            dry_run=False, confirm=True,
+        )
+        # dest created but gamma.log must not be there
+        assert not (dest / "gamma.log").exists()
+        assert report.matched == []
+
+    def test_only_paths_none_regression_copy(self, tmp_path):
+        """only_paths=None copies the full matched set — regression guard."""
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "alpha.txt").write_text("a")
+        (src / "beta.txt").write_text("b")
+        dest = tmp_path / "dest"
+
+        report = copy_entries(
+            str(src), EntryKind.FILES, ".txt",
+            destination=str(dest),
+            only_paths=None,
+            dry_run=True,
+        )
+        matched_names = {Path(p).name for p in report.matched}
+        assert "alpha.txt" in matched_names
+        assert "beta.txt" in matched_names
+
+    def test_empty_seed_rejected_even_with_only_paths_copy(self, tmp_path):
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "alpha.txt").write_text("a")
+        with pytest.raises(EmptySeedError):
+            copy_entries(
+                str(src), EntryKind.FILES, "",
+                destination=str(tmp_path / "dest"),
+                only_paths=[str(src / "alpha.txt")],
+            )
+
+
+class TestOnlyPathsMove:
+    """move_entries with only_paths: only selected entries moved."""
+
+    def test_only_paths_restricts_move(self, tmp_path):
+        """Only the selected file is moved; the other seed-match stays in place."""
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "alpha.txt").write_text("a")
+        (src / "beta.txt").write_text("b")
+        dest = tmp_path / "dest"
+
+        a_path = str(src / "alpha.txt")
+        report = move_entries(
+            str(src), EntryKind.FILES, ".txt",
+            destination=str(dest),
+            only_paths=[a_path],
+            dry_run=False, confirm=True,
+        )
+        assert (dest / "alpha.txt").exists()
+        assert not (src / "alpha.txt").exists(), "alpha must be gone from src"
+        assert (src / "beta.txt").exists(), "beta must remain in src"
+        matched_names = {Path(p).name for p in report.matched}
+        assert matched_names == {"alpha.txt"}
+
+    def test_only_paths_cannot_widen_move(self, tmp_path):
+        """A path not in seed-match is not moved."""
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "alpha.txt").write_text("a")
+        (src / "gamma.log").write_text("g")
+        dest = tmp_path / "dest"
+
+        gamma_path = str(src / "gamma.log")
+        report = move_entries(
+            str(src), EntryKind.FILES, ".txt",
+            destination=str(dest),
+            only_paths=[gamma_path],
+            dry_run=False, confirm=True,
+        )
+        assert (src / "gamma.log").exists(), "gamma.log must not be moved"
+        assert report.matched == []
+
+    def test_only_paths_none_regression_move(self, tmp_path):
+        """only_paths=None moves the full matched set — regression guard."""
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "alpha.txt").write_text("a")
+        (src / "beta.txt").write_text("b")
+        dest = tmp_path / "dest"
+
+        report = move_entries(
+            str(src), EntryKind.FILES, ".txt",
+            destination=str(dest),
+            only_paths=None,
+            dry_run=True,
+        )
+        matched_names = {Path(p).name for p in report.matched}
+        assert "alpha.txt" in matched_names
+        assert "beta.txt" in matched_names
+
+    def test_empty_seed_rejected_even_with_only_paths_move(self, tmp_path):
+        src = tmp_path / "src"
+        src.mkdir()
+        (src / "alpha.txt").write_text("a")
+        with pytest.raises(EmptySeedError):
+            move_entries(
+                str(src), EntryKind.FILES, "  ",
+                destination=str(tmp_path / "dest"),
+                only_paths=[str(src / "alpha.txt")],
+            )

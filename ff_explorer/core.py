@@ -552,6 +552,40 @@ def _guard_destructive_seed(name_seed: str, operation: str) -> None:
         raise EmptySeedError(operation)
 
 
+def _apply_only_paths(
+    matched_paths: list[Path],
+    only_paths: Iterable[str] | None,
+) -> list[Path]:
+    """Intersect *matched_paths* with *only_paths*, if provided.
+
+    Safety property: *only_paths* can only **narrow** the set — it cannot
+    introduce paths that were not already in the seed-matched set.  A path in
+    *only_paths* that is absent from *matched_paths* is silently ignored.
+
+    Parameters
+    ----------
+    matched_paths:
+        The full seed-matched path list produced by list_entries.
+    only_paths:
+        An optional iterable of absolute-path strings (the GUI-selected subset).
+        ``None`` means "act on the full matched set" — exact pre-change
+        behaviour.
+
+    Returns
+    -------
+    list[Path]
+        The (possibly narrowed) list to act on.  Order follows *matched_paths*.
+    """
+    if only_paths is None:
+        return matched_paths
+    # Normalise only_paths to a frozenset of resolved Path objects so that
+    # separator / case differences on Windows are handled by pathlib.
+    only_resolved: frozenset[Path] = frozenset(
+        Path(p).resolve() for p in only_paths
+    )
+    return [p for p in matched_paths if p.resolve() in only_resolved]
+
+
 def _is_hidden_entry(name: str, entry_path: Path) -> bool:
     """Return True when *entry_path* is hidden or system (SPEC-17).
 
@@ -1417,6 +1451,7 @@ def remove_entries(
     dry_run: bool = True,
     confirm: bool = False,
     versioning: bool = False,
+    only_paths: Iterable[str] | None = None,
 ) -> RemovalReport:
     """
     Walk *path*, filter by *name_seed*, and remove matched entries.
@@ -1459,11 +1494,17 @@ def remove_entries(
         ``<path>/.ffe-versions/<YYYYMMDD-HHMMSS>/`` preserving relative
         structure.  Default False preserves the existing send2trash /
         stdlib-delete behaviour exactly.
+    only_paths:
+        Optional explicit subset restriction (SPEC-18 multi-select).  When
+        provided, only the intersection of the seed-matched set and
+        *only_paths* is acted on.  Paths in *only_paths* that are not in the
+        seed-matched set are silently ignored (cannot widen the action set).
+        ``None`` (default) preserves exact pre-change behaviour.
 
     Returns
     -------
     RemovalReport
-        .matched      — all paths that matched the filter
+        .matched      — paths acted on (after optional only_paths intersection)
         .removed      — paths successfully removed (empty on dry_run)
         .failed       — [(path, error_message), ...] for any removal error
         .dry_run      — mirrors the dry_run parameter
@@ -1474,7 +1515,7 @@ def remove_entries(
     EmptySeedError
         If name_seed is blank or whitespace-only.
     ValueError
-        If dry_run is False but confirm is also False, or path is not a dir.
+        If confirm is not True when not in preview mode, or path is not a dir.
     """
     _guard_destructive_seed(name_seed, "remove_entries")
     root_path = _normalise_path(path)
@@ -1495,7 +1536,7 @@ def remove_entries(
         search_archives=False,
         ignore_globs=[".ffe-versions/"],
     )
-    matched_paths = [e.path for e in matches]
+    matched_paths = _apply_only_paths([e.path for e in matches], only_paths)
     report = RemovalReport(matched=matched_paths, dry_run=dry_run)
 
     if dry_run:
@@ -1547,6 +1588,7 @@ def compress_entries(
     case_sensitive: bool = True,
     dry_run: bool = True,
     confirm: bool = False,
+    only_paths: Iterable[str] | None = None,
 ) -> CompressionReport:
     """
     Walk *path*, filter by *name_seed*, compress matched entries into zip
@@ -1573,11 +1615,15 @@ def compress_entries(
     ----------
     path, kind, name_seed, case_sensitive, dry_run, confirm:
         Same semantics as remove_entries.
+    only_paths:
+        Optional explicit subset restriction (SPEC-18 multi-select).  Same
+        semantics as in remove_entries: narrows the acted-on set; cannot widen
+        it; ``None`` (default) = full matched set.
 
     Returns
     -------
     CompressionReport
-        .matched  — paths that matched the filter
+        .matched  — paths acted on (after optional only_paths intersection)
         .archives — zip archive paths created (empty on dry_run)
         .failed   — [(path, error_message), ...]
         .dry_run  — mirrors the dry_run parameter
@@ -1587,7 +1633,7 @@ def compress_entries(
     EmptySeedError
         If name_seed is blank or whitespace-only.
     ValueError
-        If dry_run=False but confirm=False, or if *path* is not a directory.
+        If the gate conditions are not met, or *path* is not a directory.
     """
     _guard_destructive_seed(name_seed, "compress_entries")
     root_path = _normalise_path(path)
@@ -1603,7 +1649,7 @@ def compress_entries(
     # entries (they are not real filesystem paths — invariant 2 / FFX-I05 guard).
     matches = list_entries(root_path, kind, name_seed, case_sensitive=case_sensitive,
                            search_archives=False)
-    matched_paths = [e.path for e in matches]
+    matched_paths = _apply_only_paths([e.path for e in matches], only_paths)
     report = CompressionReport(matched=matched_paths, dry_run=dry_run)
 
     if dry_run:
@@ -1716,6 +1762,7 @@ def copy_entries(
     match_mode: str = "substring",
     dry_run: bool = True,
     confirm: bool = False,
+    only_paths: Iterable[str] | None = None,
 ) -> TransferReport:
     """Walk *path*, filter by *name_seed*, and copy matched entries to
     *destination*.
@@ -1756,12 +1803,16 @@ def copy_entries(
     confirm:
         Explicit opt-in token (default ``False``).  Must be set to ``True``
         together with *dry_run* set to ``False`` to actually copy.
+    only_paths:
+        Optional explicit subset restriction (SPEC-18 multi-select).  Same
+        semantics as in remove_entries: narrows the acted-on set; cannot widen
+        it; ``None`` (default) = full matched set.
 
     Returns
     -------
     TransferReport
         ``.kind``        — ``"copy"``.
-        ``.matched``     — all paths that matched the filter.
+        ``.matched``     — paths acted on (after optional only_paths intersection).
         ``.transferred`` — paths successfully copied (empty on dry-run).
         ``.failed``      — ``[(source_path, error_message), ...]``.
         ``.dry_run``     — mirrors the *dry_run* parameter.
@@ -1774,8 +1825,8 @@ def copy_entries(
     EmptySeedError
         If *name_seed* is blank or whitespace-only.
     ValueError
-        If *confirm* is not ``True`` when *dry_run* is ``False``,
-        *path* is not a directory, or *destination* is inside *path*.
+        If the gate conditions are not met, *path* is not a directory, or
+        *destination* is inside *path*.
     """
     _guard_destructive_seed(name_seed, "copy_entries")
     root_path = _normalise_path(path)
@@ -1793,7 +1844,7 @@ def copy_entries(
         match_mode=match_mode,
         search_archives=False,
     )
-    matched_paths = [e.path for e in matches]
+    matched_paths = _apply_only_paths([e.path for e in matches], only_paths)
     report = TransferReport(kind="copy", matched=matched_paths, dry_run=dry_run)
 
     if dry_run:
@@ -1827,6 +1878,7 @@ def move_entries(
     match_mode: str = "substring",
     dry_run: bool = True,
     confirm: bool = False,
+    only_paths: Iterable[str] | None = None,
 ) -> TransferReport:
     """Walk *path*, filter by *name_seed*, and move matched entries to
     *destination*.
@@ -1865,12 +1917,16 @@ def move_entries(
     confirm:
         Explicit opt-in token (default ``False``).  Must be set to ``True``
         together with *dry_run* set to ``False`` to actually move.
+    only_paths:
+        Optional explicit subset restriction (SPEC-18 multi-select).  Same
+        semantics as in remove_entries: narrows the acted-on set; cannot widen
+        it; ``None`` (default) = full matched set.
 
     Returns
     -------
     TransferReport
         ``.kind``        — ``"move"``.
-        ``.matched``     — all paths that matched the filter.
+        ``.matched``     — paths acted on (after optional only_paths intersection).
         ``.transferred`` — paths successfully moved (empty on dry-run).
         ``.failed``      — ``[(source_path, error_message), ...]``.
         ``.dry_run``     — mirrors the *dry_run* parameter.
@@ -1883,8 +1939,8 @@ def move_entries(
     EmptySeedError
         If *name_seed* is blank or whitespace-only.
     ValueError
-        If *confirm* is not ``True`` when *dry_run* is ``False``,
-        *path* is not a directory, or *destination* is inside *path*.
+        If the gate conditions are not met, *path* is not a directory, or
+        *destination* is inside *path*.
     """
     _guard_destructive_seed(name_seed, "move_entries")
     root_path = _normalise_path(path)
@@ -1902,7 +1958,7 @@ def move_entries(
         match_mode=match_mode,
         search_archives=False,
     )
-    matched_paths = [e.path for e in matches]
+    matched_paths = _apply_only_paths([e.path for e in matches], only_paths)
     report = TransferReport(kind="move", matched=matched_paths, dry_run=dry_run)
 
     if dry_run:

@@ -435,6 +435,7 @@ def remove_entries(
     dry_run: bool = True,
     confirm: bool = False,
     versioning: bool = False,
+    only_paths: Iterable[str] | None = None,
 ) -> RemovalReport:
     """Walk *path*, filter by *name_seed*, and remove matched entries.
 
@@ -471,11 +472,15 @@ def remove_entries(
         When ``True``, move matched items into a timestamped recovery archive
         under ``<path>/.ffe-versions/`` instead of the OS recycle bin.
         Default ``False`` — preserves existing recycle-bin behaviour.
+    only_paths:
+        Optional explicit subset restriction (SPEC-18 multi-select).  When
+        provided, only the intersection of the seed-matched set and
+        *only_paths* is acted on.  ``None`` (default) = full matched set.
 
     Returns
     -------
     RemovalReport
-        ``.matched``      — all paths that matched the filter.
+        ``.matched``      — paths acted on (after optional only_paths intersection).
         ``.removed``      — paths successfully removed (empty on dry-run).
         ``.failed``       — ``[(path, error_message), ...]``.
         ``.dry_run``      — mirrors the *dry_run* parameter.
@@ -487,8 +492,7 @@ def remove_entries(
     EmptySeedError
         If *name_seed* is blank or whitespace-only.
     ValueError
-        If *dry_run* is False but *confirm* is also False, or *path* is
-        not a directory.
+        If the gate conditions are not met, or *path* is not a directory.
     """
     return _core_remove_entries(
         path, EntryKind(int(kind)), name_seed,
@@ -496,6 +500,7 @@ def remove_entries(
         dry_run=dry_run,
         confirm=confirm,
         versioning=versioning,
+        only_paths=only_paths,
     )
 
 
@@ -507,6 +512,7 @@ def compress_entries(
     case_sensitive: bool = True,
     dry_run: bool = True,
     confirm: bool = False,
+    only_paths: Iterable[str] | None = None,
 ) -> CompressionReport:
     """Walk *path*, filter by *name_seed*, compress matched entries into
     zip archive(s), then permanently delete the originals.
@@ -532,11 +538,15 @@ def compress_entries(
     ----------
     path, kind, name_seed, case_sensitive, dry_run, confirm:
         Same semantics as :func:`remove_entries`.
+    only_paths:
+        Optional explicit subset restriction (SPEC-18 multi-select).  Same
+        semantics as in :func:`remove_entries`.  ``None`` (default) = full
+        matched set.
 
     Returns
     -------
     CompressionReport
-        ``.matched``     — paths that matched the filter.
+        ``.matched``     — paths acted on (after optional only_paths intersection).
         ``.archives``    — zip archive paths created (empty on dry-run).
         ``.failed``      — ``[(path, error_message), ...]``.
         ``.dry_run``     — mirrors the *dry_run* parameter.
@@ -547,13 +557,14 @@ def compress_entries(
     EmptySeedError
         If *name_seed* is blank or whitespace-only.
     ValueError
-        If *dry_run=False* but *confirm=False*, or *path* is not a directory.
+        If the gate conditions are not met, or *path* is not a directory.
     """
     return _core_compress_entries(
         path, EntryKind(int(kind)), name_seed,
         case_sensitive=case_sensitive,
         dry_run=dry_run,
         confirm=confirm,
+        only_paths=only_paths,
     )
 
 
@@ -571,6 +582,7 @@ def copy_entries(
     match_mode: str = "substring",
     dry_run: bool = True,
     confirm: bool = False,
+    only_paths: Iterable[str] | None = None,
 ) -> TransferReport:
     """Walk *path*, filter by *name_seed*, and copy matched entries to
     *destination*.
@@ -603,12 +615,16 @@ def copy_entries(
         When ``True`` (default), return the preview list without copying.
     confirm:
         Explicit opt-in token (default ``False``).
+    only_paths:
+        Optional explicit subset restriction (SPEC-18 multi-select).  Same
+        semantics as in :func:`remove_entries`.  ``None`` (default) = full
+        matched set.
 
     Returns
     -------
     TransferReport
         ``.kind``        — ``"copy"``.
-        ``.matched``     — all paths that matched the filter.
+        ``.matched``     — paths acted on (after optional only_paths intersection).
         ``.transferred`` — paths successfully copied (empty on dry-run).
         ``.failed``      — ``[(source_path, error_message), ...]``.
         ``.dry_run``     — mirrors the *dry_run* parameter.
@@ -630,6 +646,7 @@ def copy_entries(
         match_mode=match_mode,
         dry_run=dry_run,
         confirm=confirm,
+        only_paths=only_paths,
     )
 
 
@@ -643,6 +660,7 @@ def move_entries(
     match_mode: str = "substring",
     dry_run: bool = True,
     confirm: bool = False,
+    only_paths: Iterable[str] | None = None,
 ) -> TransferReport:
     """Walk *path*, filter by *name_seed*, and move matched entries to
     *destination*.
@@ -675,12 +693,16 @@ def move_entries(
         When ``True`` (default), return the preview list without moving.
     confirm:
         Explicit opt-in token (default ``False``).
+    only_paths:
+        Optional explicit subset restriction (SPEC-18 multi-select).  Same
+        semantics as in :func:`remove_entries`.  ``None`` (default) = full
+        matched set.
 
     Returns
     -------
     TransferReport
         ``.kind``        — ``"move"``.
-        ``.matched``     — all paths that matched the filter.
+        ``.matched``     — paths acted on (after optional only_paths intersection).
         ``.transferred`` — paths successfully moved (empty on dry-run).
         ``.failed``      — ``[(source_path, error_message), ...]``.
         ``.dry_run``     — mirrors the *dry_run* parameter.
@@ -702,6 +724,7 @@ def move_entries(
         match_mode=match_mode,
         dry_run=dry_run,
         confirm=confirm,
+        only_paths=only_paths,
     )
 
 
