@@ -116,9 +116,11 @@ from ff_explorer import (
     MatchEntry,
     SkippedEntry,
     compress_entries,
+    copy_entries,
     entry_metadata,
     iter_entries,
     list_entries,
+    move_entries,
     remove_entries,
     save_listing,
 )
@@ -252,6 +254,8 @@ _ACTION_LABELS: dict[str, int] = {
     "Save list": 1,
     "Remove list": 2,
     "Compress list": 3,
+    "Copy list": 4,
+    "Move list": 5,
 }
 
 # Match-mode display labels → core param values
@@ -1117,14 +1121,23 @@ class MainWindow(QMainWindow):
             )
 
         # SPEC-19: show results view (always, for any action including Save/Remove/Compress)
-        self._show_results_view(entries, skipped, entry_label)
+        # SPEC-18: results view now returns the subset of user-selected paths (or None
+        # when "Apply to all" was chosen or for non-selectable actions like Save).
+        selected_paths = self._show_results_view(entries, skipped, entry_label, action_code)
 
         if action_code == 1:
+            # Save: always acts on the full set (save_listing has no only_paths);
+            # subset-apply for Save would just save the selected paths which is
+            # surprising — full-set behaviour is the least-surprising choice here.
             self._do_save(path, kind, seed, entry_label, entries)
         elif action_code == 2:
-            self._do_remove(path, kind, seed, entry_label, entries)
+            self._do_remove(path, kind, seed, entry_label, entries, only_paths=selected_paths)
         elif action_code == 3:
-            self._do_compress(path, kind, seed, entry_label, entries)
+            self._do_compress(path, kind, seed, entry_label, entries, only_paths=selected_paths)
+        elif action_code == 4:
+            self._do_copy(path, kind, seed, entry_label, entries, only_paths=selected_paths)
+        elif action_code == 5:
+            self._do_move(path, kind, seed, entry_label, entries, only_paths=selected_paths)
 
     # ------------------------------------------------------------------
     # Results / properties view (SPEC-19)
@@ -1135,33 +1148,53 @@ class MainWindow(QMainWindow):
         entries: list[MatchEntry],
         skipped: "list[SkippedEntry]",
         entry_label: str,
-    ) -> None:
-        """Open the results dialog (SPEC-19) after a scan completes.
+        action_code: int = -1,
+    ) -> "list[str] | None":
+        """Open the results dialog (SPEC-19 / SPEC-18) after a scan completes.
 
         Shows matched entries in a QTableWidget with columns:
           Name | Path | Type | Size | Modified
 
-        Size and Modified are fetched from ``entry_metadata`` on demand (lazy):
-        only the currently *selected* row triggers a metadata call — this keeps
-        the dialog responsive for large result sets.  For archive-internal entries
-        whose path does not exist on the filesystem, ``entry_metadata`` may raise
-        OSError/FileNotFoundError; those cells show a blank gracefully.
+        SPEC-18 multi-select:
+          The table supports extended multi-row selection.  When the user has
+          rows selected and clicks "Apply to selected (N)", this method returns
+          a list of absolute path strings for those rows (excluding any
+          archive-internal entries, which cannot be acted on destructively or
+          copied/moved).  When the user clicks "Apply to all" or closes the
+          dialog without selecting an action, ``None`` is returned, preserving
+          the legacy full-set behaviour.
 
-        A "Properties" button at the bottom opens a small metadata dialog for
-        the selected row (SPEC-19 §2).  A "Show skipped" button (visible only
-        when skips > 0) opens a read-only list of skipped paths (SPEC-15).
+          For the Save action (action_code == 1) only "Apply to all" is shown
+          because save_listing has no only_paths parameter.
 
-        The existing Save / Remove / Compress flows are not gated by this dialog:
-        the dialog is presented, then execution returns to ``_on_scan_complete``
-        which dispatches to the action handler regardless of how the user closes
-        the results view.
+        Parameters
+        ----------
+        entries:
+            Matched entries from the scan worker.
+        skipped:
+            Entries that could not be accessed during the scan (SPEC-15).
+        entry_label:
+            "file" or "folder" for display strings.
+        action_code:
+            The selected action code from _ACTION_LABELS.  Governs which
+            apply buttons are shown.
+
+        Returns
+        -------
+        list[str] | None
+            The list of selected (non-archive-internal) absolute path strings
+            when the user chose "Apply to selected", or ``None`` for "Apply to
+            all" / close-without-action (legacy full-set behaviour).
         """
+        # Mutable container shared by closures for the return value.
+        _result: dict = {"only_paths": None}
+
         dlg = QDialog(self)
         dlg.setWindowTitle(
             f"Results — {len(entries)} {entry_label}(s) found"
             + (f"  ({len(skipped)} skipped)" if skipped else "")
         )
-        dlg.resize(780, 480)
+        dlg.resize(780, 520)
         outer = QVBoxLayout(dlg)
         outer.setContentsMargins(8, 8, 8, 8)
         outer.setSpacing(6)
@@ -1170,6 +1203,7 @@ class MainWindow(QMainWindow):
         summary_lbl = QLabel(
             f"{len(entries)} {entry_label}(s) found."
             + (f"  {len(skipped)} path(s) skipped." if skipped else "")
+            + "\n(Ctrl+click or Shift+click to select multiple rows for subset action.)"
         )
         outer.addWidget(summary_lbl)
 
@@ -1183,7 +1217,14 @@ class MainWindow(QMainWindow):
 
         table = QTableWidget(len(entries), len(_HEADERS), dlg)
         table.setHorizontalHeaderLabels(_HEADERS)
-        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        # SPEC-18: ExtendedSelection enables Ctrl+click and Shift+click multi-select
+        table.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectRows
+        )
+        from PySide6.QtWidgets import QAbstractItemView
+        table.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection
+        )
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         table.horizontalHeader().setStretchLastSection(True)
         table.horizontalHeader().setSectionResizeMode(
@@ -1249,7 +1290,88 @@ class MainWindow(QMainWindow):
 
         outer.addWidget(table)
 
-        # Button row: Properties | Show skipped (conditional) | Close
+        # ------------------------------------------------------------------
+        # SPEC-18: Apply-to-selected / Apply-to-all button row
+        # ------------------------------------------------------------------
+        # Helper: collect selected paths, excluding archive-internal entries.
+        def _collect_selected_paths() -> "tuple[list[str], int]":
+            """Return (non_archive_paths, excluded_archive_count)."""
+            selected_rows = {idx.row() for idx in table.selectedIndexes()}
+            non_archive: list[str] = []
+            excluded = 0
+            for row in sorted(selected_rows):
+                if row < 0 or row >= len(entries):
+                    continue
+                p = entries[row].path
+                p_str = str(p)
+                # Archive-internal entries have '!' in their path (zip-internal notation)
+                # or carry in_archive=True if the MatchEntry has that attribute.
+                is_archive_internal = (
+                    "!" in p_str
+                    or getattr(entries[row], "in_archive", False)
+                )
+                if is_archive_internal:
+                    excluded += 1
+                else:
+                    non_archive.append(p_str)
+            return non_archive, excluded
+
+        # The "Apply to selected" button (disabled when no rows are selected)
+        apply_selected_btn = QPushButton("Apply to selected (0)")
+        register_info(apply_selected_btn, "results_apply_selected")
+        apply_selected_btn.setEnabled(False)
+
+        # The "Apply to all" button (always enabled)
+        apply_all_btn = QPushButton(f"Apply to all ({len(entries)})")
+        register_info(apply_all_btn, "results_apply_all")
+        apply_all_btn.setEnabled(bool(entries))
+
+        # Keep "Apply to selected" label and enabled state in sync with selection.
+        def _update_apply_selected_btn() -> None:
+            selected_rows = {idx.row() for idx in table.selectedIndexes()}
+            n = len(selected_rows)
+            apply_selected_btn.setText(f"Apply to selected ({n})")
+            apply_selected_btn.setEnabled(n > 0)
+
+        table.itemSelectionChanged.connect(_update_apply_selected_btn)
+
+        def _on_apply_selected() -> None:
+            paths, excluded = _collect_selected_paths()
+            if excluded > 0:
+                QMessageBox.information(
+                    dlg,
+                    "Archive-internal entries excluded",
+                    f"{excluded} archive-internal entry/entries were excluded from the "
+                    "selection — they cannot be acted on destructively or copied/moved.",
+                )
+            if not paths:
+                # All selected rows were archive-internal; nothing to act on.
+                self._set_status(
+                    "All selected entries are archive-internal; no action was taken."
+                )
+                dlg.accept()
+                return
+            _result["only_paths"] = paths
+            dlg.accept()
+
+        def _on_apply_all() -> None:
+            _result["only_paths"] = None  # None = legacy full-set
+            dlg.accept()
+
+        apply_selected_btn.clicked.connect(_on_apply_selected)
+        apply_all_btn.clicked.connect(_on_apply_all)
+
+        # Button rows
+        action_btn_row = QHBoxLayout()
+        # For Save (code=1), only "Apply to all" is meaningful because save_listing
+        # has no only_paths — show only that button to avoid a misleading "Apply to
+        # selected" that would silently act on the full set anyway.
+        if action_code != 1:
+            action_btn_row.addWidget(apply_selected_btn)
+        action_btn_row.addWidget(apply_all_btn)
+        action_btn_row.addStretch()
+
+        # Properties / skipped / close row
         btn_row = QHBoxLayout()
 
         props_btn = QPushButton("Properties")
@@ -1281,8 +1403,11 @@ class MainWindow(QMainWindow):
         close_btn.clicked.connect(dlg.accept)
         btn_row.addWidget(close_btn)
 
+        outer.addLayout(action_btn_row)
         outer.addLayout(btn_row)
         dlg.exec()
+
+        return _result["only_paths"]
 
     def _show_entry_properties(self, path, meta: "dict | None") -> None:
         """Open a small read-only properties dialog for *path* (SPEC-19 §2).
@@ -1394,16 +1519,20 @@ class MainWindow(QMainWindow):
         seed: str,
         entry_label: str,
         entries: list[MatchEntry],
+        only_paths: "list[str] | None" = None,
     ) -> None:
         """
-        Remove list — SAFETY GATE (SPEC-14 update):
+        Remove list — SAFETY GATE (SPEC-14 / SPEC-18 update):
           1. The off-thread worker already scanned and collected matched entries
              (scan played the role of the dry-run preview).
-          2. Show confirmation dialog with the matched paths (main thread).
+          2. Show confirmation dialog with the acted-on paths (main thread).
+             When only_paths is set (subset mode), the dialog lists the subset;
+             when None, the full matched set is listed.
           3. Only on Yes: call remove_entries(dry_run=False, confirm=True) on the
              main thread.  Cancel of a *confirmed* mutation is out of scope; the
              scan/preview phase is the only cancellable step.
 
+        SPEC-18: only_paths narrows the acted-on set.  None = legacy full-set.
         Passes case_sensitive to remove_entries.
         Passes versioning=True when the versioning checkbox is checked (FFX-I08).
         """
@@ -1416,8 +1545,16 @@ class MainWindow(QMainWindow):
         if versioning:
             core_kwargs["versioning"] = True
 
-        matched_paths = [e.path for e in entries]
-        preview_text = self._build_preview_text(matched_paths, entry_label)
+        # SPEC-18: determine the display set for the confirmation dialog.
+        if only_paths is not None:
+            from pathlib import Path as _Path
+            display_paths = [_Path(p) for p in only_paths]
+            subset_note = f"\n(Subset: {len(only_paths)} of {len(entries)} matched entries)"
+        else:
+            display_paths = [e.path for e in entries]
+            subset_note = ""
+
+        preview_text = self._build_preview_text(display_paths, entry_label)
         versioning_note = (
             "\n\nFiles will be moved to .ffe-versions/ (recoverable)."
             if versioning else
@@ -1428,14 +1565,17 @@ class MainWindow(QMainWindow):
             "Confirm removal",
             (
                 f"About to remove "
-                f"{len(entries)} {entry_label}(s):\n\n"
+                f"{len(display_paths)} {entry_label}(s):{subset_note}\n\n"
                 f"{preview_text}\n\nProceed?{versioning_note}"
             ),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if reply == QMessageBox.StandardButton.Yes:
-            report = remove_entries(path, kind, seed, dry_run=False, confirm=True, **core_kwargs)
+            extra: dict = {}
+            if only_paths is not None:
+                extra["only_paths"] = only_paths
+            report = remove_entries(path, kind, seed, dry_run=False, confirm=True, **core_kwargs, **extra)
             msg = f"{len(report.removed)} {entry_label}(s) removed."
             if versioning and report.versioned_to:
                 msg += f"  Versions saved to: {report.versioned_to}"
@@ -1452,15 +1592,17 @@ class MainWindow(QMainWindow):
         seed: str,
         entry_label: str,
         entries: list[MatchEntry],
+        only_paths: "list[str] | None" = None,
     ) -> None:
         """
-        Compress list — SAFETY GATE (SPEC-14 update, same pattern as _do_remove):
+        Compress list — SAFETY GATE (SPEC-14 / SPEC-18 update, same pattern as _do_remove):
           1. The off-thread worker already scanned and collected matched entries.
           2. Show confirmation dialog on the main thread (originals deleted after
              compression — note this clearly).
           3. Only on Yes: call compress_entries(dry_run=False, confirm=True) on the
              main thread.
 
+        SPEC-18: only_paths narrows the acted-on set.  None = legacy full-set.
         Passes case_sensitive to compress_entries.
         """
         if not entries:
@@ -1468,13 +1610,22 @@ class MainWindow(QMainWindow):
             return
 
         core_kwargs = self._build_core_kwargs()
-        matched_paths = [e.path for e in entries]
-        preview_text = self._build_preview_text(matched_paths, entry_label)
+
+        # SPEC-18: determine the display set for the confirmation dialog.
+        if only_paths is not None:
+            from pathlib import Path as _Path
+            display_paths = [_Path(p) for p in only_paths]
+            subset_note = f"\n(Subset: {len(only_paths)} of {len(entries)} matched entries)"
+        else:
+            display_paths = [e.path for e in entries]
+            subset_note = ""
+
+        preview_text = self._build_preview_text(display_paths, entry_label)
         reply = QMessageBox.question(
             self,
             "Confirm compression",
             (
-                f"About to compress {len(entries)} {entry_label}(s):\n\n"
+                f"About to compress {len(display_paths)} {entry_label}(s):{subset_note}\n\n"
                 f"{preview_text}\n\n"
                 "Originals will be deleted after compression.  Proceed?"
             ),
@@ -1482,13 +1633,163 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.No,
         )
         if reply == QMessageBox.StandardButton.Yes:
-            report = compress_entries(path, kind, seed, dry_run=False, confirm=True, **core_kwargs)
+            extra: dict = {}
+            if only_paths is not None:
+                extra["only_paths"] = only_paths
+            report = compress_entries(path, kind, seed, dry_run=False, confirm=True, **core_kwargs, **extra)
             msg = f"{len(report.archives)} archive(s) created."
             if report.failed:
                 msg += f"  {len(report.failed)} compression/delete(s) failed."
             self._set_status(msg)
         else:
             self._set_status("Compression cancelled.")
+
+    def _do_copy(
+        self,
+        path: str,
+        kind: EntryKind,
+        seed: str,
+        entry_label: str,
+        entries: list[MatchEntry],
+        only_paths: "list[str] | None" = None,
+    ) -> None:
+        """
+        Copy list — SAFETY GATE (SPEC-18):
+          1. Prompt for a destination directory via QFileDialog.
+          2. Dry-run copy_entries to build the preview list.
+          3. Show QMessageBox.question (default No) with preview + destination.
+          4. Only on Yes: call copy_entries(dry_run=False, confirm=True).
+
+        SPEC-18: only_paths narrows the acted-on set.  None = legacy full-set.
+        Passes case_sensitive via core_kwargs.
+        """
+        if not entries:
+            self._set_status(f"No {entry_label} was found — nothing was copied.")
+            return
+
+        destination = QFileDialog.getExistingDirectory(
+            self,
+            "FF Explorer — destination for Copy",
+            "",
+        )
+        if not destination:
+            self._set_status("Copy cancelled — no destination selected.")
+            return
+
+        core_kwargs = self._build_core_kwargs()
+        extra: dict = {}
+        if only_paths is not None:
+            extra["only_paths"] = only_paths
+
+        # SPEC-18: determine the display set for the confirmation dialog.
+        if only_paths is not None:
+            from pathlib import Path as _Path
+            display_paths = [_Path(p) for p in only_paths]
+            subset_note = f"\n(Subset: {len(only_paths)} of {len(entries)} matched entries)"
+        else:
+            display_paths = [e.path for e in entries]
+            subset_note = ""
+
+        preview_text = self._build_preview_text(display_paths, entry_label)
+        reply = QMessageBox.question(
+            self,
+            "Confirm copy",
+            (
+                f"About to copy {len(display_paths)} {entry_label}(s){subset_note}\n"
+                f"to: {destination}\n\n"
+                f"{preview_text}\n\nProceed?"
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            report = copy_entries(
+                path, kind, seed,
+                destination=destination,
+                dry_run=False,
+                confirm=True,
+                **core_kwargs,
+                **extra,
+            )
+            msg = f"{len(report.transferred)} {entry_label}(s) copied to {destination}."
+            if report.failed:
+                msg += f"  {len(report.failed)} copy failure(s)."
+            self._set_status(msg)
+        else:
+            self._set_status("Copy cancelled.")
+
+    def _do_move(
+        self,
+        path: str,
+        kind: EntryKind,
+        seed: str,
+        entry_label: str,
+        entries: list[MatchEntry],
+        only_paths: "list[str] | None" = None,
+    ) -> None:
+        """
+        Move list — SAFETY GATE (SPEC-18, same pattern as _do_copy):
+          1. Prompt for a destination directory via QFileDialog.
+          2. Show QMessageBox.question (default No) with preview + destination.
+          3. Only on Yes: call move_entries(dry_run=False, confirm=True).
+
+        SPEC-18: only_paths narrows the acted-on set.  None = legacy full-set.
+        Passes case_sensitive via core_kwargs.
+        """
+        if not entries:
+            self._set_status(f"No {entry_label} was found — nothing was moved.")
+            return
+
+        destination = QFileDialog.getExistingDirectory(
+            self,
+            "FF Explorer — destination for Move",
+            "",
+        )
+        if not destination:
+            self._set_status("Move cancelled — no destination selected.")
+            return
+
+        core_kwargs = self._build_core_kwargs()
+        extra: dict = {}
+        if only_paths is not None:
+            extra["only_paths"] = only_paths
+
+        # SPEC-18: determine the display set for the confirmation dialog.
+        if only_paths is not None:
+            from pathlib import Path as _Path
+            display_paths = [_Path(p) for p in only_paths]
+            subset_note = f"\n(Subset: {len(only_paths)} of {len(entries)} matched entries)"
+        else:
+            display_paths = [e.path for e in entries]
+            subset_note = ""
+
+        preview_text = self._build_preview_text(display_paths, entry_label)
+        reply = QMessageBox.question(
+            self,
+            "Confirm move",
+            (
+                f"About to move {len(display_paths)} {entry_label}(s){subset_note}\n"
+                f"to: {destination}\n\n"
+                f"{preview_text}\n\nProceed?"
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            report = move_entries(
+                path, kind, seed,
+                destination=destination,
+                dry_run=False,
+                confirm=True,
+                **core_kwargs,
+                **extra,
+            )
+            msg = f"{len(report.transferred)} {entry_label}(s) moved to {destination}."
+            if report.failed:
+                msg += f"  {len(report.failed)} move failure(s)."
+            self._set_status(msg)
+        else:
+            self._set_status("Move cancelled.")
 
     # ------------------------------------------------------------------
     # Utility

@@ -2175,6 +2175,10 @@ class TestWidgetRegistryWiring:
         "filter_ignore_globs",     # _ignore_globs_edit
         "filter_versioning",       # _versioning_check
         "filter_include_hidden",   # _include_hidden_check (SPEC-17)
+        # SPEC-18 result-view buttons (registered inside _show_results_view)
+        # These are NOT on the main window but are tested via the results-view
+        # dialog tests — they do not appear in findChildren(QWidget) on win itself.
+        # They are registered in WIDGET_INFO and tested in A21.
     }
 
     def test_run_key_exists_in_registry(self):
@@ -2875,7 +2879,7 @@ class TestResultsView:
             results_view_calls = []
             save_calls = []
 
-            def fake_results_view(ents, skipped, label):
+            def fake_results_view(ents, skipped, label, action_code=-1):
                 results_view_calls.append({"entries": ents, "skipped": skipped})
 
             def fake_save(path, kind, seed, **kwargs):
@@ -3238,6 +3242,709 @@ class TestIncludeHiddenControl:
                 "Default state (all filters at default, include_hidden checked) "
                 "must still produce an empty kwargs dict"
             )
+        finally:
+            win.close()
+            win.deleteLater()
+
+
+# ---------------------------------------------------------------------------
+# A21 — SPEC-18: bulk operations, multi-select, Copy/Move, only_paths gate
+# ---------------------------------------------------------------------------
+
+class TestBulkOperationsSpec18:
+    """A21: SPEC-18 bulk operations.
+
+    Covers:
+    - _ACTION_LABELS includes Copy list (4) and Move list (5)
+    - WIDGET_INFO has action_detail.4, action_detail.5, results_apply_selected,
+      results_apply_all entries
+    - _show_results_view uses ExtendedSelection
+    - Subset: only_paths = selected non-archive paths passed to core op
+    - No selection: only_paths is None (legacy full-set)
+    - Archive-internal rows excluded from destructive subset
+    - Copy/Move: dest picker → confirm No → no mutate; confirm Yes → mutate once
+    - _do_copy/_do_move: QFileDialog patched, gate defaults No, gate passes Yes
+    """
+
+    @staticmethod
+    def _make_entries(tmp_path: Path) -> list:
+        from ff_explorer import MatchEntry, EntryKind
+        f1 = tmp_path / "alpha.txt"
+        f2 = tmp_path / "beta.txt"
+        f3 = tmp_path / "gamma.txt"
+        f1.write_bytes(b"a")
+        f2.write_bytes(b"b")
+        f3.write_bytes(b"g")
+        return [
+            MatchEntry(path=f1, kind=EntryKind.FILES),
+            MatchEntry(path=f2, kind=EntryKind.FILES),
+            MatchEntry(path=f3, kind=EntryKind.FILES),
+        ]
+
+    # ------------------------------------------------------------------
+    # Registry / action-labels checks
+    # ------------------------------------------------------------------
+
+    def test_action_labels_include_copy_and_move(self, qapp):
+        """_ACTION_LABELS must contain 'Copy list' (4) and 'Move list' (5)."""
+        from ff_explorer.gui.main_window import _ACTION_LABELS
+        assert "Copy list" in _ACTION_LABELS, (
+            "'Copy list' must be in _ACTION_LABELS (SPEC-18)"
+        )
+        assert _ACTION_LABELS["Copy list"] == 4, (
+            "'Copy list' must map to action code 4"
+        )
+        assert "Move list" in _ACTION_LABELS, (
+            "'Move list' must be in _ACTION_LABELS (SPEC-18)"
+        )
+        assert _ACTION_LABELS["Move list"] == 5, (
+            "'Move list' must map to action code 5"
+        )
+
+    def test_action_combo_includes_copy_and_move(self, qapp):
+        """The action combobox in MainWindow must contain 'Copy list' and 'Move list'."""
+        win = MainWindow()
+        try:
+            items = [win._action_combo.itemText(i)
+                     for i in range(win._action_combo.count())]
+            assert "Copy list" in items, (
+                "Action combobox must include 'Copy list' (SPEC-18)"
+            )
+            assert "Move list" in items, (
+                "Action combobox must include 'Move list' (SPEC-18)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_widget_info_has_copy_move_action_details(self):
+        """WIDGET_INFO must have action_detail.4 and action_detail.5 (SPEC-18)."""
+        assert "action_detail.4" in WIDGET_INFO, (
+            "WIDGET_INFO must contain 'action_detail.4' for Copy list (SPEC-18)"
+        )
+        assert "action_detail.5" in WIDGET_INFO, (
+            "WIDGET_INFO must contain 'action_detail.5' for Move list (SPEC-18)"
+        )
+        assert WIDGET_INFO["action_detail.4"], "action_detail.4 must be non-empty"
+        assert WIDGET_INFO["action_detail.5"], "action_detail.5 must be non-empty"
+
+    def test_widget_info_has_apply_buttons_keys(self):
+        """WIDGET_INFO must have results_apply_selected and results_apply_all."""
+        assert "results_apply_selected" in WIDGET_INFO, (
+            "WIDGET_INFO must contain 'results_apply_selected' (SPEC-18)"
+        )
+        assert "results_apply_all" in WIDGET_INFO, (
+            "WIDGET_INFO must contain 'results_apply_all' (SPEC-18)"
+        )
+        assert WIDGET_INFO["results_apply_selected"], "results_apply_selected must be non-empty"
+        assert WIDGET_INFO["results_apply_all"], "results_apply_all must be non-empty"
+
+    def test_copy_move_action_tooltip_changes(self, qapp):
+        """Selecting 'Copy list' and 'Move list' in the combobox produces distinct tooltips."""
+        win = MainWindow()
+        try:
+            items = [win._action_combo.itemText(i)
+                     for i in range(win._action_combo.count())]
+            copy_idx = items.index("Copy list")
+            move_idx = items.index("Move list")
+            win._action_combo.setCurrentIndex(copy_idx)
+            copy_tip = win._action_combo.toolTip()
+            win._action_combo.setCurrentIndex(move_idx)
+            move_tip = win._action_combo.toolTip()
+            assert copy_tip, "Copy list tooltip must be non-empty"
+            assert move_tip, "Move list tooltip must be non-empty"
+            assert copy_tip != move_tip, (
+                "Copy list and Move list tooltips must differ"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    # ------------------------------------------------------------------
+    # Results view: ExtendedSelection
+    # ------------------------------------------------------------------
+
+    def test_results_view_table_uses_extended_selection(self, qapp, tmp_path):
+        """Results QTableWidget must use ExtendedSelection (SPEC-18 multi-select)."""
+        from PySide6.QtWidgets import QDialog, QTableWidget, QAbstractItemView
+        win = MainWindow()
+        try:
+            entries = self._make_entries(tmp_path)
+            tables_found = []
+
+            def fake_exec(self_dlg):
+                for child in self_dlg.findChildren(QTableWidget):
+                    tables_found.append(child)
+                return 0
+
+            with patch.object(QDialog, "exec", fake_exec):
+                win._show_results_view(entries, [], "file", action_code=2)
+
+            assert tables_found, "Results dialog must contain a QTableWidget"
+            table = tables_found[0]
+            assert table.selectionMode() == QAbstractItemView.SelectionMode.ExtendedSelection, (
+                "Results table must use ExtendedSelection (SPEC-18)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_results_view_has_apply_selected_and_apply_all_buttons(self, qapp, tmp_path):
+        """Results dialog must contain 'Apply to selected' and 'Apply to all' buttons
+        for non-Save actions (SPEC-18)."""
+        from PySide6.QtWidgets import QDialog, QPushButton
+        win = MainWindow()
+        try:
+            entries = self._make_entries(tmp_path)
+            buttons_found = []
+
+            def fake_exec(self_dlg):
+                for btn in self_dlg.findChildren(QPushButton):
+                    buttons_found.append(btn.text())
+                return 0
+
+            with patch.object(QDialog, "exec", fake_exec):
+                win._show_results_view(entries, [], "file", action_code=2)
+
+            apply_sel = [t for t in buttons_found if "selected" in t.lower()]
+            apply_all = [t for t in buttons_found if "all" in t.lower()]
+            assert apply_sel, (
+                "Results dialog must have an 'Apply to selected' button for Remove action"
+            )
+            assert apply_all, (
+                "Results dialog must have an 'Apply to all' button for Remove action"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_results_view_save_action_no_apply_selected_button(self, qapp, tmp_path):
+        """For the Save action (code=1), 'Apply to selected' must NOT be shown
+        (save_listing has no only_paths; full-set is the only meaningful choice)."""
+        from PySide6.QtWidgets import QDialog, QPushButton
+        win = MainWindow()
+        try:
+            entries = self._make_entries(tmp_path)
+            buttons_found = []
+
+            def fake_exec(self_dlg):
+                for btn in self_dlg.findChildren(QPushButton):
+                    buttons_found.append(btn.text())
+                return 0
+
+            with patch.object(QDialog, "exec", fake_exec):
+                win._show_results_view(entries, [], "file", action_code=1)
+
+            apply_sel = [t for t in buttons_found if "selected" in t.lower()]
+            assert not apply_sel, (
+                "Save action must NOT show 'Apply to selected' button "
+                "(save_listing has no only_paths — SPEC-18)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    # ------------------------------------------------------------------
+    # Subset: only_paths passed to core ops when rows are selected
+    # ------------------------------------------------------------------
+
+    def test_do_remove_with_only_paths_passes_them_to_core(self, qapp, tmp_path):
+        """_do_remove with only_paths=[path] passes only_paths to remove_entries.
+
+        Selecting a subset of result rows and invoking remove passes
+        only_paths = the selected paths to remove_entries (core call).
+        """
+        from ff_explorer import MatchEntry, EntryKind
+        from ff_explorer.core import RemovalReport
+        win = MainWindow()
+        try:
+            f1 = tmp_path / "alpha.txt"
+            f2 = tmp_path / "beta.txt"
+            f1.write_bytes(b"a")
+            f2.write_bytes(b"b")
+            entries = [
+                MatchEntry(path=f1, kind=EntryKind.FILES),
+                MatchEntry(path=f2, kind=EntryKind.FILES),
+            ]
+            # Only select f1
+            selected = [str(f1)]
+            live_report = RemovalReport(matched=[f1], removed=[f1])
+
+            captured: dict = {}
+
+            def fake_remove(path, kind, seed, dry_run=True, confirm=False, **kwargs):
+                captured.update(kwargs)
+                captured["dry_run"] = dry_run
+                return live_report
+
+            with (
+                patch("ff_explorer.gui.main_window.remove_entries", side_effect=fake_remove),
+                patch("ff_explorer.gui.main_window.QMessageBox.question",
+                      return_value=QMessageBox.StandardButton.Yes),
+            ):
+                win._do_remove(str(tmp_path), win._current_kind(), "alpha", "file",
+                               entries, only_paths=selected)
+
+            assert "only_paths" in captured, (
+                "_do_remove must forward only_paths to remove_entries when set"
+            )
+            assert set(captured["only_paths"]) == {str(f1)}, (
+                "only_paths forwarded to remove_entries must match the selected subset"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_do_remove_no_selection_passes_no_only_paths(self, qapp, tmp_path):
+        """_do_remove with only_paths=None passes no only_paths kwarg (legacy full-set)."""
+        from ff_explorer import MatchEntry, EntryKind
+        from ff_explorer.core import RemovalReport
+        win = MainWindow()
+        try:
+            f1 = tmp_path / "alpha.txt"
+            f1.write_bytes(b"a")
+            entries = [MatchEntry(path=f1, kind=EntryKind.FILES)]
+            live_report = RemovalReport(matched=[f1], removed=[f1])
+
+            captured: dict = {}
+
+            def fake_remove(path, kind, seed, dry_run=True, confirm=False, **kwargs):
+                captured.update(kwargs)
+                return live_report
+
+            with (
+                patch("ff_explorer.gui.main_window.remove_entries", side_effect=fake_remove),
+                patch("ff_explorer.gui.main_window.QMessageBox.question",
+                      return_value=QMessageBox.StandardButton.Yes),
+            ):
+                win._do_remove(str(tmp_path), win._current_kind(), "alpha", "file",
+                               entries, only_paths=None)
+
+            assert "only_paths" not in captured, (
+                "_do_remove must NOT pass only_paths when it is None (legacy full-set)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_do_compress_with_only_paths_passes_them_to_core(self, qapp, tmp_path):
+        """_do_compress with only_paths passes them to compress_entries (SPEC-18)."""
+        from ff_explorer import MatchEntry, EntryKind
+        from ff_explorer.core import CompressionReport
+        win = MainWindow()
+        try:
+            f1 = tmp_path / "alpha.txt"
+            f2 = tmp_path / "beta.txt"
+            f1.write_bytes(b"a")
+            f2.write_bytes(b"b")
+            entries = [
+                MatchEntry(path=f1, kind=EntryKind.FILES),
+                MatchEntry(path=f2, kind=EntryKind.FILES),
+            ]
+            selected = [str(f1)]
+            live_report = CompressionReport(matched=[f1], archives=[tmp_path / "alpha.zip"])
+
+            captured: dict = {}
+
+            def fake_compress(path, kind, seed, dry_run=True, confirm=False, **kwargs):
+                captured.update(kwargs)
+                return live_report
+
+            with (
+                patch("ff_explorer.gui.main_window.compress_entries",
+                      side_effect=fake_compress),
+                patch("ff_explorer.gui.main_window.QMessageBox.question",
+                      return_value=QMessageBox.StandardButton.Yes),
+            ):
+                win._do_compress(str(tmp_path), win._current_kind(), "alpha", "file",
+                                 entries, only_paths=selected)
+
+            assert "only_paths" in captured, (
+                "_do_compress must forward only_paths to compress_entries when set"
+            )
+            assert set(captured["only_paths"]) == {str(f1)}, (
+                "only_paths forwarded to compress_entries must match selected subset"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    # ------------------------------------------------------------------
+    # Archive-internal exclusion
+    # ------------------------------------------------------------------
+
+    def test_archive_internal_rows_excluded_from_subset(self, qapp, tmp_path):
+        """_show_results_view: rows whose path contains '!' (archive-internal) are
+        excluded from the only_paths list returned for 'Apply to selected'.
+
+        We simulate table row selection programmatically and trigger the internal
+        'Apply to selected' callback by patching QDialog.exec to select rows and
+        click the button.
+        """
+        from ff_explorer import MatchEntry, EntryKind
+        from PySide6.QtWidgets import QDialog, QPushButton
+
+        win = MainWindow()
+        try:
+            # One normal entry and one archive-internal entry
+            f_normal = tmp_path / "real.txt"
+            f_normal.write_bytes(b"x")
+            # Archive-internal: path contains '!'
+            archive_entry_path = Path(str(tmp_path / "archive.zip") + "!member.txt")
+
+            entries = [
+                MatchEntry(path=f_normal, kind=EntryKind.FILES),
+                MatchEntry(path=archive_entry_path, kind=EntryKind.FILES),
+            ]
+
+            result_holder = []
+
+            def fake_exec(self_dlg):
+                from PySide6.QtWidgets import QTableWidget
+                tables = self_dlg.findChildren(QTableWidget)
+                if tables:
+                    # Select all rows
+                    tables[0].selectAll()
+                # Click "Apply to selected"
+                for btn in self_dlg.findChildren(QPushButton):
+                    if "selected" in btn.text().lower() and btn.isEnabled():
+                        btn.click()
+                        break
+                return 0
+
+            # Intercept QMessageBox.information (archive exclusion note)
+            with (
+                patch.object(QDialog, "exec", fake_exec),
+                patch("ff_explorer.gui.main_window.QMessageBox.information"),
+            ):
+                result = win._show_results_view(entries, [], "file", action_code=2)
+
+            # The archive-internal entry must have been excluded from only_paths
+            if result is not None:
+                assert str(archive_entry_path) not in result, (
+                    "Archive-internal path must be excluded from only_paths subset (SPEC-18)"
+                )
+                assert str(f_normal) in result, (
+                    "Normal (non-archive-internal) path must be included in only_paths"
+                )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_apply_all_returns_none(self, qapp, tmp_path):
+        """Clicking 'Apply to all' in the results view returns None (legacy full-set)."""
+        from ff_explorer import MatchEntry, EntryKind
+        from PySide6.QtWidgets import QDialog, QPushButton
+
+        win = MainWindow()
+        try:
+            f1 = tmp_path / "alpha.txt"
+            f1.write_bytes(b"a")
+            entries = [MatchEntry(path=f1, kind=EntryKind.FILES)]
+
+            def fake_exec(self_dlg):
+                for btn in self_dlg.findChildren(QPushButton):
+                    if "all" in btn.text().lower() and btn.isEnabled():
+                        btn.click()
+                        break
+                return 0
+
+            with patch.object(QDialog, "exec", fake_exec):
+                result = win._show_results_view(entries, [], "file", action_code=2)
+
+            assert result is None, (
+                "'Apply to all' must return None (legacy full-set, only_paths=None)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    # ------------------------------------------------------------------
+    # Copy / Move: gate defaults to No; gate passes Yes; dest picker patched
+    # ------------------------------------------------------------------
+
+    def test_do_copy_dialog_default_no_skips_mutate(self, qapp, tmp_path):
+        """_do_copy: QMessageBox.question returns No → copy_entries(dry_run=False)
+        is never called.  Gate defaults to No (SPEC-18 safety requirement)."""
+        from ff_explorer import MatchEntry, EntryKind
+        win = MainWindow()
+        try:
+            f1 = tmp_path / "alpha.txt"
+            f1.write_bytes(b"a")
+            entries = [MatchEntry(path=f1, kind=EntryKind.FILES)]
+            dest = str(tmp_path / "dest")
+
+            mutate_calls = []
+
+            def fake_copy(path, kind, seed, destination, dry_run=True, confirm=False, **kw):
+                if not dry_run:
+                    mutate_calls.append(True)
+                    raise AssertionError("copy_entries(dry_run=False) must not be called when No")
+                from ff_explorer.core import TransferReport
+                return TransferReport(kind="copy", matched=[f1])
+
+            with (
+                patch("ff_explorer.gui.main_window.copy_entries", side_effect=fake_copy),
+                patch("ff_explorer.gui.main_window.QFileDialog.getExistingDirectory",
+                      return_value=dest),
+                patch("ff_explorer.gui.main_window.QMessageBox.question",
+                      return_value=QMessageBox.StandardButton.No),
+            ):
+                win._do_copy(str(tmp_path), win._current_kind(), "alpha", "file", entries)
+
+            assert len(mutate_calls) == 0, (
+                "copy_entries(dry_run=False) must not be called when confirm dialog returns No"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_do_copy_yes_calls_copy_entries_once(self, qapp, tmp_path):
+        """_do_copy: confirm Yes → copy_entries called once with dry_run=False,
+        confirm=True, correct destination and only_paths (SPEC-18)."""
+        from ff_explorer import MatchEntry, EntryKind
+        from ff_explorer.core import TransferReport
+        win = MainWindow()
+        try:
+            f1 = tmp_path / "alpha.txt"
+            f1.write_bytes(b"a")
+            entries = [MatchEntry(path=f1, kind=EntryKind.FILES)]
+            dest = str(tmp_path / "dest")
+            selected = [str(f1)]
+            live_report = TransferReport(kind="copy", matched=[f1], transferred=[f1])
+
+            captured: dict = {}
+
+            def fake_copy(path, kind, seed, destination, dry_run=True, confirm=False, **kw):
+                captured["dry_run"] = dry_run
+                captured["confirm"] = confirm
+                captured["destination"] = destination
+                captured.update(kw)
+                return live_report
+
+            with (
+                patch("ff_explorer.gui.main_window.copy_entries", side_effect=fake_copy),
+                patch("ff_explorer.gui.main_window.QFileDialog.getExistingDirectory",
+                      return_value=dest),
+                patch("ff_explorer.gui.main_window.QMessageBox.question",
+                      return_value=QMessageBox.StandardButton.Yes),
+            ):
+                win._do_copy(str(tmp_path), win._current_kind(), "alpha", "file",
+                             entries, only_paths=selected)
+
+            assert captured.get("dry_run") is False, (
+                "copy_entries must be called with dry_run=False on Yes"
+            )
+            assert captured.get("confirm") is True, (
+                "copy_entries must be called with confirm=True on Yes"
+            )
+            assert captured.get("destination") == dest, (
+                "copy_entries must receive the chosen destination directory"
+            )
+            assert set(captured.get("only_paths", [])) == {str(f1)}, (
+                "copy_entries must receive only_paths matching the selected subset"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_do_move_dialog_default_no_skips_mutate(self, qapp, tmp_path):
+        """_do_move: QMessageBox.question returns No → move_entries(dry_run=False)
+        is never called.  Gate defaults to No (SPEC-18 safety requirement)."""
+        from ff_explorer import MatchEntry, EntryKind
+        win = MainWindow()
+        try:
+            f1 = tmp_path / "alpha.txt"
+            f1.write_bytes(b"a")
+            entries = [MatchEntry(path=f1, kind=EntryKind.FILES)]
+            dest = str(tmp_path / "dest")
+
+            mutate_calls = []
+
+            def fake_move(path, kind, seed, destination, dry_run=True, confirm=False, **kw):
+                if not dry_run:
+                    mutate_calls.append(True)
+                    raise AssertionError("move_entries(dry_run=False) must not be called when No")
+                from ff_explorer.core import TransferReport
+                return TransferReport(kind="move", matched=[f1])
+
+            with (
+                patch("ff_explorer.gui.main_window.move_entries", side_effect=fake_move),
+                patch("ff_explorer.gui.main_window.QFileDialog.getExistingDirectory",
+                      return_value=dest),
+                patch("ff_explorer.gui.main_window.QMessageBox.question",
+                      return_value=QMessageBox.StandardButton.No),
+            ):
+                win._do_move(str(tmp_path), win._current_kind(), "alpha", "file", entries)
+
+            assert len(mutate_calls) == 0, (
+                "move_entries(dry_run=False) must not be called when confirm dialog returns No"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_do_move_yes_calls_move_entries_once(self, qapp, tmp_path):
+        """_do_move: confirm Yes → move_entries called once with dry_run=False,
+        confirm=True, correct destination and only_paths (SPEC-18)."""
+        from ff_explorer import MatchEntry, EntryKind
+        from ff_explorer.core import TransferReport
+        win = MainWindow()
+        try:
+            f1 = tmp_path / "alpha.txt"
+            f1.write_bytes(b"a")
+            entries = [MatchEntry(path=f1, kind=EntryKind.FILES)]
+            dest = str(tmp_path / "dest")
+            selected = [str(f1)]
+            live_report = TransferReport(kind="move", matched=[f1], transferred=[f1])
+
+            captured: dict = {}
+
+            def fake_move(path, kind, seed, destination, dry_run=True, confirm=False, **kw):
+                captured["dry_run"] = dry_run
+                captured["confirm"] = confirm
+                captured["destination"] = destination
+                captured.update(kw)
+                return live_report
+
+            with (
+                patch("ff_explorer.gui.main_window.move_entries", side_effect=fake_move),
+                patch("ff_explorer.gui.main_window.QFileDialog.getExistingDirectory",
+                      return_value=dest),
+                patch("ff_explorer.gui.main_window.QMessageBox.question",
+                      return_value=QMessageBox.StandardButton.Yes),
+            ):
+                win._do_move(str(tmp_path), win._current_kind(), "alpha", "file",
+                             entries, only_paths=selected)
+
+            assert captured.get("dry_run") is False, (
+                "move_entries must be called with dry_run=False on Yes"
+            )
+            assert captured.get("confirm") is True, (
+                "move_entries must be called with confirm=True on Yes"
+            )
+            assert captured.get("destination") == dest, (
+                "move_entries must receive the chosen destination directory"
+            )
+            assert set(captured.get("only_paths", [])) == {str(f1)}, (
+                "move_entries must receive only_paths matching the selected subset"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_do_copy_no_destination_cancels_without_core_call(self, qapp, tmp_path):
+        """_do_copy: when QFileDialog returns '' (user cancelled), copy_entries is
+        never called — no mutation, no crash (SPEC-18)."""
+        from ff_explorer import MatchEntry, EntryKind
+        win = MainWindow()
+        try:
+            f1 = tmp_path / "alpha.txt"
+            f1.write_bytes(b"a")
+            entries = [MatchEntry(path=f1, kind=EntryKind.FILES)]
+
+            core_calls = []
+
+            def fake_copy(*a, **kw):
+                core_calls.append(True)
+                from ff_explorer.core import TransferReport
+                return TransferReport(kind="copy")
+
+            with (
+                patch("ff_explorer.gui.main_window.copy_entries", side_effect=fake_copy),
+                patch("ff_explorer.gui.main_window.QFileDialog.getExistingDirectory",
+                      return_value=""),
+            ):
+                win._do_copy(str(tmp_path), win._current_kind(), "alpha", "file", entries)
+
+            assert not core_calls, (
+                "copy_entries must not be called when the destination picker is cancelled"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_do_move_no_destination_cancels_without_core_call(self, qapp, tmp_path):
+        """_do_move: when QFileDialog returns '' (user cancelled), move_entries is
+        never called — no mutation, no crash (SPEC-18)."""
+        from ff_explorer import MatchEntry, EntryKind
+        win = MainWindow()
+        try:
+            f1 = tmp_path / "alpha.txt"
+            f1.write_bytes(b"a")
+            entries = [MatchEntry(path=f1, kind=EntryKind.FILES)]
+
+            core_calls = []
+
+            def fake_move(*a, **kw):
+                core_calls.append(True)
+                from ff_explorer.core import TransferReport
+                return TransferReport(kind="move")
+
+            with (
+                patch("ff_explorer.gui.main_window.move_entries", side_effect=fake_move),
+                patch("ff_explorer.gui.main_window.QFileDialog.getExistingDirectory",
+                      return_value=""),
+            ):
+                win._do_move(str(tmp_path), win._current_kind(), "alpha", "file", entries)
+
+            assert not core_calls, (
+                "move_entries must not be called when the destination picker is cancelled"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_do_copy_empty_entries_skips_everything(self, qapp, tmp_path):
+        """_do_copy with empty entries list sets status and exits early — no dialog."""
+        from ff_explorer import EntryKind
+        win = MainWindow()
+        try:
+            core_calls = []
+            dialog_calls = []
+
+            def fake_copy(*a, **kw):
+                core_calls.append(True)
+                from ff_explorer.core import TransferReport
+                return TransferReport(kind="copy")
+
+            def fake_get_dir(*a, **kw):
+                dialog_calls.append(True)
+                return "/some/dest"
+
+            with (
+                patch("ff_explorer.gui.main_window.copy_entries", side_effect=fake_copy),
+                patch("ff_explorer.gui.main_window.QFileDialog.getExistingDirectory",
+                      side_effect=fake_get_dir),
+            ):
+                win._do_copy(str(tmp_path), win._current_kind(), "test", "file", [])
+
+            assert not core_calls, "_do_copy with empty entries must not call copy_entries"
+            assert not dialog_calls, "_do_copy with empty entries must not open QFileDialog"
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_do_move_empty_entries_skips_everything(self, qapp, tmp_path):
+        """_do_move with empty entries list sets status and exits early — no dialog."""
+        from ff_explorer import EntryKind
+        win = MainWindow()
+        try:
+            core_calls = []
+
+            def fake_move(*a, **kw):
+                core_calls.append(True)
+                from ff_explorer.core import TransferReport
+                return TransferReport(kind="move")
+
+            with (
+                patch("ff_explorer.gui.main_window.move_entries", side_effect=fake_move),
+                patch("ff_explorer.gui.main_window.QFileDialog.getExistingDirectory",
+                      return_value="/some/dest"),
+            ):
+                win._do_move(str(tmp_path), win._current_kind(), "test", "file", [])
+
+            assert not core_calls, "_do_move with empty entries must not call move_entries"
         finally:
             win.close()
             win.deleteLater()

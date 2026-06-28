@@ -78,6 +78,14 @@ WIDGET_INFO: dict[str, str] = {
         "\n   For files, compress all in one .zip in root"
         "\n   For folders, compress each one in root"
     ),
+    "action_detail.4": (
+        "\n   Copy matched files/folders to a chosen destination directory.\n"
+        "   Dry-run preview shown before copy; confirm defaults to No."
+    ),
+    "action_detail.5": (
+        "\n   Move matched files/folders to a chosen destination directory.\n"
+        "   Dry-run preview shown before move; confirm defaults to No."
+    ),
 
     # ---- Run button ----
     "run": "Execute the configured search and apply the selected action.",
@@ -169,7 +177,7 @@ WIDGET_INFO: dict[str, str] = {
         "on Windows)."
     ),
 
-    # ---- Results / properties view (SPEC-19) ----
+    # ---- Results / properties view (SPEC-19 / SPEC-18) ----
     "results_show_skipped": (
         "Show the list of paths that were skipped during the scan\n"
         "due to permission or access errors."
@@ -177,6 +185,15 @@ WIDGET_INFO: dict[str, str] = {
     "results_properties": (
         "Show detailed metadata (size, type, created/modified times,\n"
         "permissions) for the selected entry."
+    ),
+    "results_apply_selected": (
+        "Apply the chosen action to the selected rows only.\n"
+        "Archive-internal entries are excluded from destructive / copy / move operations.\n"
+        "With no rows selected this button is disabled — select at least one row."
+    ),
+    "results_apply_all": (
+        "Apply the chosen action to the full matched set (all rows).\n"
+        "This is the same as the pre-SPEC-18 behaviour."
     ),
 
     # ---- Settings dialog ----
