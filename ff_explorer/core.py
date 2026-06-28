@@ -13,7 +13,8 @@ Pure query (no side effects):
                  extensions=None,
                  respect_ignore=False, ignore_globs=None,
                  search_archives=False,
-                 content_query=None, content_max_bytes=CONTENT_MAX_BYTES) -> list[MatchEntry]
+                 content_query=None, content_max_bytes=CONTENT_MAX_BYTES,
+                 include_hidden=True) -> list[MatchEntry]
     entry_metadata(path) -> dict
     largest_entries(path, top_n=50, *, name_seed="") -> list[SizedEntry]
     find_duplicates(path, *, min_size=0, algo="sha256") -> list[DuplicateGroup]
@@ -26,6 +27,10 @@ Guarded destructive operations:
                      dry_run=True, confirm=False) -> CompressionReport
     rename_entries(path, kind, name_seed, *, rules=None, case_sensitive=True,
                    match_mode="substring", dry_run=True, confirm=False) -> RenameReport
+    copy_entries(path, kind, name_seed, *, destination, case_sensitive=True,
+                 match_mode="substring", dry_run=True, confirm=False) -> TransferReport
+    move_entries(path, kind, name_seed, *, destination, case_sensitive=True,
+                 match_mode="substring", dry_run=True, confirm=False) -> TransferReport
 
 Typed errors:
     FFExplorerError          — base class for all structured errors from this module
@@ -78,6 +83,7 @@ import logging
 import os
 import re
 import shutil
+import stat as _stat_module
 import tarfile
 import zipfile
 from dataclasses import dataclass, field
@@ -272,6 +278,38 @@ class CompressionReport:
     @property
     def would_affect(self) -> list[Path]:
         """Paths that would be / were compressed (preview list)."""
+        return self.matched
+
+
+@dataclass
+class TransferReport:
+    """Returned by copy_entries and move_entries regardless of dry_run state.
+
+    Attributes
+    ----------
+    kind:
+        ``"copy"`` or ``"move"`` — discriminates which operation produced the report.
+    matched:
+        All paths that matched the filter (source side).
+    transferred:
+        Paths successfully copied/moved (empty on dry_run).
+    failed:
+        ``[(source_path, error_message), ...]`` for any per-item failure.
+    dry_run:
+        Mirrors the *dry_run* parameter.
+    destination:
+        The destination directory used (str), or ``None`` on dry_run.
+    """
+    kind: str = "copy"
+    matched: list[Path] = field(default_factory=list)
+    transferred: list[Path] = field(default_factory=list)
+    failed: list[tuple[Path, str]] = field(default_factory=list)
+    dry_run: bool = True
+    destination: str | None = None
+
+    @property
+    def would_affect(self) -> list[Path]:
+        """Paths that would be / were targeted (preview list)."""
         return self.matched
 
 
@@ -514,6 +552,41 @@ def _guard_destructive_seed(name_seed: str, operation: str) -> None:
         raise EmptySeedError(operation)
 
 
+def _is_hidden_entry(name: str, entry_path: Path) -> bool:
+    """Return True when *entry_path* is hidden or system (SPEC-17).
+
+    Cross-platform:
+    - POSIX hidden: name starts with a dot (``.``).
+    - Windows hidden/system: ``stat().st_file_attributes`` carries the
+      ``FILE_ATTRIBUTE_HIDDEN`` (0x02) or ``FILE_ATTRIBUTE_SYSTEM`` (0x04)
+      flags.  The attribute is only present on Windows (``os.stat_result``
+      does not carry it on POSIX); guarded with ``hasattr``.
+    - On Windows, dotfile convention is also honoured in addition to the
+      attribute check.
+
+    A stat() call is made only when the platform provides
+    ``st_file_attributes`` (i.e. on Windows); on POSIX only the name is
+    inspected — no extra syscall.
+
+    OSError on stat is silently ignored (treated as not-hidden so the entry
+    is included, consistent with the rest of the walk's error handling).
+    """
+    # Dotfile check applies everywhere (POSIX canonical, also useful on Windows)
+    if name.startswith("."):
+        return True
+    # Windows attribute check (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)
+    try:
+        st = entry_path.stat()
+        if hasattr(st, "st_file_attributes"):
+            _HIDDEN = _stat_module.FILE_ATTRIBUTE_HIDDEN   # 0x02
+            _SYSTEM = _stat_module.FILE_ATTRIBUTE_SYSTEM   # 0x04
+            if st.st_file_attributes & (_HIDDEN | _SYSTEM):
+                return True
+    except OSError:
+        pass
+    return False
+
+
 # _IGNORE_FILE_NAMES — filenames whose contents are treated as gitwildmatch
 # ignore patterns during a respect_ignore walk (FFX-I04).
 _IGNORE_FILE_NAMES: tuple[str, ...] = (".gitignore", ".ignore")
@@ -718,6 +791,7 @@ def iter_entries(
     search_archives: bool = False,
     content_query: str | None = None,
     content_max_bytes: int = CONTENT_MAX_BYTES,
+    include_hidden: bool = True,
     _skipped: "list[SkippedEntry] | None" = None,
 ) -> Iterator[MatchEntry]:
     """Generator variant of :func:`list_entries` — yields each :class:`MatchEntry`
@@ -733,6 +807,17 @@ def iter_entries(
     modified_after, modified_before, extensions, respect_ignore, ignore_globs,
     search_archives, content_query, content_max_bytes:
         Identical semantics to :func:`list_entries`.
+    include_hidden:
+        When ``True`` (default), hidden and system entries are included in
+        results — identical to pre-SPEC-17 behaviour.  When ``False``,
+        hidden/system entries are excluded.  Cross-platform:
+
+        - POSIX: names starting with ``.`` are hidden.
+        - Windows: entries whose ``st_file_attributes`` carries
+          ``FILE_ATTRIBUTE_HIDDEN`` (0x02) or ``FILE_ATTRIBUTE_SYSTEM`` (0x04)
+          are excluded; dotfiles are also excluded.
+
+        Default ``True`` — no regression vs. existing callers.
     _skipped:
         Optional list to collect :class:`SkippedEntry` objects for every path
         that could not be accessed due to a recoverable error (e.g.
@@ -796,12 +881,18 @@ def iter_entries(
 
     # Determine whether any structured filter is active to avoid stat() overhead
     # when no filters are requested (hot path: exact legacy behaviour).
+    # SPEC-17: include_hidden=False requires a stat() call on Windows to check
+    # st_file_attributes; on POSIX only the name is checked (no stat needed).
+    # We conservatively set needs_stat=True when include_hidden=False so that
+    # the Windows attribute check path is available; _is_hidden_entry guards
+    # itself with hasattr so POSIX incurs no extra syscall.
     needs_stat = (
         min_size is not None
         or max_size is not None
         or modified_after is not None
         or modified_before is not None
         or ext_set is not None
+        or not include_hidden  # SPEC-17: may need st_file_attributes on Windows
     )
 
     # Ignore-awareness is active when either flag is set (FFX-I04).
@@ -814,12 +905,15 @@ def iter_entries(
     # Any active advanced filter falls back to the live walk for correctness.
     # _skipped is also a signal to use the live walk (index path does not
     # model per-entry access errors).
+    # SPEC-17: include_hidden=False bypasses the index (index does not model
+    # hidden/system attribute).
     _use_index = (
         not needs_stat
         and not use_ignore
         and not search_archives
         and content_query is None
         and _skipped is None
+        and include_hidden  # SPEC-17: index does not filter hidden entries
     )
     if _use_index:
         # Lazy import — keeps the rest of core.py importable without index.py
@@ -908,6 +1002,10 @@ def iter_entries(
                                 match_mode, compiled_pattern):
                     continue
                 entry_path = current / name
+                # SPEC-17: hidden/system exclusion (fast dotfile check first,
+                # then Windows attribute check inside _is_hidden_entry).
+                if not include_hidden and _is_hidden_entry(name, entry_path):
+                    continue
                 if needs_stat:
                     try:
                         stat = entry_path.stat()
@@ -931,6 +1029,10 @@ def iter_entries(
                                 match_mode, compiled_pattern):
                     continue
                 entry_path = current / name
+                # SPEC-17: hidden/system exclusion (fast dotfile check first,
+                # then Windows attribute check inside _is_hidden_entry).
+                if not include_hidden and _is_hidden_entry(name, entry_path):
+                    continue
                 if needs_stat:
                     try:
                         stat = entry_path.stat()
@@ -996,6 +1098,7 @@ def list_entries(
     search_archives: bool = False,
     content_query: str | None = None,
     content_max_bytes: int = CONTENT_MAX_BYTES,
+    include_hidden: bool = True,
 ) -> list[MatchEntry]:
     """
     Traverse *path* recursively and return every entry whose name matches
@@ -1088,6 +1191,12 @@ def list_entries(
         larger than this cap are silently skipped (treated as no-match).
         Default :data:`ff_explorer.content_search.CONTENT_MAX_BYTES` (10 MiB).
         Ignored when *content_query* is ``None``.
+    include_hidden:
+        When ``True`` (default), hidden and system entries are included —
+        identical to pre-SPEC-17 behaviour, no regression.  When ``False``,
+        hidden/system entries are excluded.  Cross-platform: POSIX dotfiles
+        (names starting with ``.``) and Windows ``FILE_ATTRIBUTE_HIDDEN`` /
+        ``FILE_ATTRIBUTE_SYSTEM`` entries are excluded.  Default ``True``.
 
     Returns
     -------
@@ -1124,6 +1233,7 @@ def list_entries(
         search_archives=search_archives,
         content_query=content_query,
         content_max_bytes=content_max_bytes,
+        include_hidden=include_hidden,
         _skipped=None,
     ))
 
@@ -1145,6 +1255,7 @@ def list_entries_with_report(
     search_archives: bool = False,
     content_query: str | None = None,
     content_max_bytes: int = CONTENT_MAX_BYTES,
+    include_hidden: bool = True,
 ) -> ListingResult:
     """Walk *path* and return matched entries together with a skip report.
 
@@ -1160,6 +1271,9 @@ def list_entries_with_report(
     modified_after, modified_before, extensions, respect_ignore, ignore_globs,
     search_archives, content_query, content_max_bytes:
         Same semantics as :func:`list_entries`.
+    include_hidden:
+        Same semantics as :func:`list_entries`.  Default ``True`` — no
+        regression vs. existing callers.
 
     Returns
     -------
@@ -1192,6 +1306,7 @@ def list_entries_with_report(
         search_archives=search_archives,
         content_query=content_query,
         content_max_bytes=content_max_bytes,
+        include_hidden=include_hidden,
         _skipped=skipped,
     ))
     return ListingResult(entries=entries, skipped=skipped)
@@ -1539,6 +1654,271 @@ def compress_entries(
                     report.failed.append((fd, f"post-compress delete failed: {exc}"))
             except OSError as exc:
                 report.failed.append((fd, str(exc)))
+
+    return report
+
+
+# ---------------------------------------------------------------------------
+# Bulk copy / move operations  (SPEC-18 — gated destructive-style ops)
+# ---------------------------------------------------------------------------
+
+def _validate_destination(destination: str | Path, source_root: Path) -> Path:
+    """Validate and return the resolved destination directory.
+
+    Creates the destination (with parents) if it does not already exist.
+    Raises ``ValueError`` if the destination resolves inside *source_root*
+    (recursion guard).
+
+    Parameters
+    ----------
+    destination:
+        Target directory path (string or Path).
+    source_root:
+        The resolved source root from which entries are being transferred.
+
+    Returns
+    -------
+    Path
+        Resolved absolute destination directory.
+
+    Raises
+    ------
+    ValueError
+        If the destination would be inside *source_root* (recursion risk).
+    """
+    dest = Path(destination).resolve()
+    # Recursion guard: destination must not be inside source_root.
+    try:
+        dest.relative_to(source_root)
+        # If we get here, dest IS inside source_root — that is a problem.
+        raise ValueError(
+            f"copy/move destination {dest!r} is inside the source root "
+            f"{source_root!r} which would cause recursion.  "
+            "Choose a destination outside the source tree."
+        )
+    except ValueError as exc:
+        # Re-raise only our own recursion error; the relative_to failure
+        # (dest is NOT inside source_root) means we are safe to proceed.
+        if "recursion" in str(exc):
+            raise
+    # Create the destination directory if it does not exist.
+    dest.mkdir(parents=True, exist_ok=True)
+    return dest
+
+
+def copy_entries(
+    path: str | Path,
+    kind: EntryKind | int,
+    name_seed: str,
+    *,
+    destination: str | Path,
+    case_sensitive: bool = True,
+    match_mode: str = "substring",
+    dry_run: bool = True,
+    confirm: bool = False,
+) -> TransferReport:
+    """Walk *path*, filter by *name_seed*, and copy matched entries to
+    *destination*.
+
+    Safety guards (identical to :func:`remove_entries`):
+
+    1. *name_seed* must be non-empty and non-whitespace — ``EmptySeedError``
+       otherwise.
+    2. *dry_run* defaults to ``True`` — returns the would-affect list without
+       copying anything; safe preview mode.
+    3. Setting *confirm* to ``True`` alongside *dry_run* set to ``False`` is
+       the only way to actually copy entries.  Both flags must be set together.
+
+    Copy semantics:
+    - Files: ``shutil.copy2`` (preserves metadata).
+    - Directories: ``shutil.copytree`` with ``dirs_exist_ok=True`` (handles
+      existing targets gracefully).
+    - Per-item failures are collected into ``TransferReport.failed``; the
+      batch always completes (a failure never aborts remaining items).
+
+    Parameters
+    ----------
+    path:
+        Root directory to walk.
+    kind:
+        :attr:`EntryKind.FOLDERS` (0) or :attr:`EntryKind.FILES` (1).
+    name_seed:
+        Non-empty filter pattern.  Blank raises ``EmptySeedError``.
+    destination:
+        Target directory.  Created (with parents) if it does not exist.
+        Must not be inside *path* (recursion guard).
+    case_sensitive:
+        Case-sensitive name matching (default ``True``).
+    match_mode:
+        ``"substring"`` (default), ``"glob"``, or ``"regex"``.
+    dry_run:
+        When ``True`` (default), return the preview list without copying.
+    confirm:
+        Explicit opt-in token (default ``False``).  Must be set to ``True``
+        together with *dry_run* set to ``False`` to actually copy.
+
+    Returns
+    -------
+    TransferReport
+        ``.kind``        — ``"copy"``.
+        ``.matched``     — all paths that matched the filter.
+        ``.transferred`` — paths successfully copied (empty on dry-run).
+        ``.failed``      — ``[(source_path, error_message), ...]``.
+        ``.dry_run``     — mirrors the *dry_run* parameter.
+        ``.destination`` — destination directory (str), or ``None`` on
+                           dry-run.
+        ``.would_affect`` — alias for ``.matched``.
+
+    Raises
+    ------
+    EmptySeedError
+        If *name_seed* is blank or whitespace-only.
+    ValueError
+        If *confirm* is not ``True`` when *dry_run* is ``False``,
+        *path* is not a directory, or *destination* is inside *path*.
+    """
+    _guard_destructive_seed(name_seed, "copy_entries")
+    root_path = _normalise_path(path)
+    kind = EntryKind(int(kind))
+
+    if not dry_run and not confirm:
+        raise ValueError(
+            "copy_entries() requires the confirm flag to be True when the "
+            "dry_run flag is False.  Set both flags explicitly to mutate."
+        )
+
+    matches = list_entries(
+        root_path, kind, name_seed,
+        case_sensitive=case_sensitive,
+        match_mode=match_mode,
+        search_archives=False,
+    )
+    matched_paths = [e.path for e in matches]
+    report = TransferReport(kind="copy", matched=matched_paths, dry_run=dry_run)
+
+    if dry_run:
+        return report
+
+    dest_dir = _validate_destination(destination, root_path)
+    report.destination = str(dest_dir)
+
+    for src in matched_paths:
+        target = dest_dir / src.name
+        try:
+            if src.is_dir():
+                shutil.copytree(str(src), str(target), dirs_exist_ok=True)
+            else:
+                shutil.copy2(str(src), str(target))
+            report.transferred.append(src)
+        except OSError as exc:
+            logger.warning("copy_entries: failed to copy %s -> %s: %s", src, target, exc)
+            report.failed.append((src, str(exc)))
+
+    return report
+
+
+def move_entries(
+    path: str | Path,
+    kind: EntryKind | int,
+    name_seed: str,
+    *,
+    destination: str | Path,
+    case_sensitive: bool = True,
+    match_mode: str = "substring",
+    dry_run: bool = True,
+    confirm: bool = False,
+) -> TransferReport:
+    """Walk *path*, filter by *name_seed*, and move matched entries to
+    *destination*.
+
+    Safety guards (identical to :func:`remove_entries`):
+
+    1. *name_seed* must be non-empty and non-whitespace — ``EmptySeedError``
+       otherwise.
+    2. *dry_run* defaults to ``True`` — returns the would-affect list without
+       moving anything; safe preview mode.
+    3. Setting *confirm* to ``True`` alongside *dry_run* set to ``False`` is
+       the only way to actually move entries.  Both flags must be set together.
+
+    Move semantics:
+    - ``shutil.move`` for both files and directories.
+    - Per-item failures are collected into ``TransferReport.failed``; the
+      batch always completes (a failure never aborts remaining items).
+
+    Parameters
+    ----------
+    path:
+        Root directory to walk.
+    kind:
+        :attr:`EntryKind.FOLDERS` (0) or :attr:`EntryKind.FILES` (1).
+    name_seed:
+        Non-empty filter pattern.  Blank raises ``EmptySeedError``.
+    destination:
+        Target directory.  Created (with parents) if it does not exist.
+        Must not be inside *path* (recursion guard).
+    case_sensitive:
+        Case-sensitive name matching (default ``True``).
+    match_mode:
+        ``"substring"`` (default), ``"glob"``, or ``"regex"``.
+    dry_run:
+        When ``True`` (default), return the preview list without moving.
+    confirm:
+        Explicit opt-in token (default ``False``).  Must be set to ``True``
+        together with *dry_run* set to ``False`` to actually move.
+
+    Returns
+    -------
+    TransferReport
+        ``.kind``        — ``"move"``.
+        ``.matched``     — all paths that matched the filter.
+        ``.transferred`` — paths successfully moved (empty on dry-run).
+        ``.failed``      — ``[(source_path, error_message), ...]``.
+        ``.dry_run``     — mirrors the *dry_run* parameter.
+        ``.destination`` — destination directory (str), or ``None`` on
+                           dry-run.
+        ``.would_affect`` — alias for ``.matched``.
+
+    Raises
+    ------
+    EmptySeedError
+        If *name_seed* is blank or whitespace-only.
+    ValueError
+        If *confirm* is not ``True`` when *dry_run* is ``False``,
+        *path* is not a directory, or *destination* is inside *path*.
+    """
+    _guard_destructive_seed(name_seed, "move_entries")
+    root_path = _normalise_path(path)
+    kind = EntryKind(int(kind))
+
+    if not dry_run and not confirm:
+        raise ValueError(
+            "move_entries() requires the confirm flag to be True when the "
+            "dry_run flag is False.  Set both flags explicitly to mutate."
+        )
+
+    matches = list_entries(
+        root_path, kind, name_seed,
+        case_sensitive=case_sensitive,
+        match_mode=match_mode,
+        search_archives=False,
+    )
+    matched_paths = [e.path for e in matches]
+    report = TransferReport(kind="move", matched=matched_paths, dry_run=dry_run)
+
+    if dry_run:
+        return report
+
+    dest_dir = _validate_destination(destination, root_path)
+    report.destination = str(dest_dir)
+
+    for src in matched_paths:
+        target = dest_dir / src.name
+        try:
+            shutil.move(str(src), str(target))
+            report.transferred.append(src)
+        except OSError as exc:
+            logger.warning("move_entries: failed to move %s -> %s: %s", src, target, exc)
+            report.failed.append((src, str(exc)))
 
     return report
 

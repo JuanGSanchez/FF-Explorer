@@ -24,6 +24,7 @@ from ff_explorer.core import (
     ListingResult,
     RemovalReport,
     CompressionReport,
+    TransferReport,
     FFExplorerError,
     EmptySeedError,
     list_entries,
@@ -33,6 +34,8 @@ from ff_explorer.core import (
     save_listing,
     remove_entries,
     compress_entries,
+    copy_entries,
+    move_entries,
     configure_logging,
 )
 
@@ -44,6 +47,7 @@ __all__ = [
     "ListingResult",
     "RemovalReport",
     "CompressionReport",
+    "TransferReport",
     "FFExplorerError",
     "EmptySeedError",
     "list_entries",
@@ -53,5 +57,7 @@ __all__ = [
     "save_listing",
     "remove_entries",
     "compress_entries",
+    "copy_entries",
+    "move_entries",
     "configure_logging",
 ]

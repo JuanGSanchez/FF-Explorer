@@ -292,3 +292,151 @@ class TestServiceIgnorePassthrough:
         # Both must contain the .log file (ignore is OFF)
         names = {e.path.name for e in baseline}
         assert "drop.log" in names
+
+
+# ===========================================================================
+# SPEC-17 — service passthrough for include_hidden
+# ===========================================================================
+
+@pytest.fixture()
+def hidden_svc_tree(tmp_path: Path) -> Path:
+    """Tree with a dotfile and a normal file for include_hidden tests."""
+    (tmp_path / "visible.txt").write_text("v")
+    (tmp_path / ".dotfile.txt").write_text("h")
+    return tmp_path
+
+
+class TestServiceIncludeHidden:
+    """Verify service.list_entries forwards include_hidden to core."""
+
+    def test_default_true_includes_dotfile(self, hidden_svc_tree):
+        results = service.list_entries(str(hidden_svc_tree), 1, "")
+        names = {e.path.name for e in results}
+        assert ".dotfile.txt" in names
+        assert "visible.txt" in names
+
+    def test_false_excludes_dotfile(self, hidden_svc_tree):
+        results = service.list_entries(str(hidden_svc_tree), 1, "",
+                                       include_hidden=False)
+        names = {e.path.name for e in results}
+        assert "visible.txt" in names
+        assert ".dotfile.txt" not in names
+
+    def test_explicit_true_same_as_default(self, hidden_svc_tree):
+        default = service.list_entries(str(hidden_svc_tree), 1, "")
+        explicit = service.list_entries(str(hidden_svc_tree), 1, "",
+                                        include_hidden=True)
+        assert {e.path for e in default} == {e.path for e in explicit}
+
+    def test_iter_entries_include_hidden_false(self, hidden_svc_tree):
+        results = list(service.iter_entries(str(hidden_svc_tree), 1, "",
+                                            include_hidden=False))
+        names = {e.path.name for e in results}
+        assert ".dotfile.txt" not in names
+        assert "visible.txt" in names
+
+    def test_list_entries_with_report_include_hidden_false(self, hidden_svc_tree):
+        result = service.list_entries_with_report(str(hidden_svc_tree), 1, "",
+                                                  include_hidden=False)
+        names = {e.path.name for e in result.entries}
+        assert ".dotfile.txt" not in names
+        assert "visible.txt" in names
+
+
+# ===========================================================================
+# SPEC-18 — service passthroughs for copy_entries / move_entries
+# ===========================================================================
+
+@pytest.fixture()
+def transfer_svc_tree(tmp_path: Path) -> Path:
+    """Source + dest root for transfer service tests."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "alpha.txt").write_text("alpha")
+    (src / "beta.txt").write_text("beta")
+    (src / "gamma.log").write_text("gamma")
+    return tmp_path
+
+
+class TestServiceCopyEntries:
+    """service.copy_entries passthroughs and gate forwarding."""
+
+    def test_dry_run_default_copies_nothing(self, transfer_svc_tree):
+        src = transfer_svc_tree / "src"
+        dest = transfer_svc_tree / "dest"
+        report = service.copy_entries(str(src), 1, "alpha",
+                                      destination=str(dest))
+        assert report.dry_run is True
+        assert report.transferred == []
+        assert not dest.exists()
+
+    def test_dry_run_matched_set_correct(self, transfer_svc_tree):
+        src = transfer_svc_tree / "src"
+        report = service.copy_entries(str(src), 1, ".txt",
+                                      destination=str(transfer_svc_tree / "dest"))
+        matched_names = {p.name for p in report.matched}
+        assert "alpha.txt" in matched_names
+        assert "gamma.log" not in matched_names
+
+    def test_live_copy_files_at_dest(self, transfer_svc_tree):
+        src = transfer_svc_tree / "src"
+        dest = transfer_svc_tree / "dest"
+        report = service.copy_entries(str(src), 1, "alpha",
+                                      destination=str(dest),
+                                      dry_run=False, confirm=True)
+        assert (dest / "alpha.txt").exists()
+        assert (src / "alpha.txt").exists()  # original preserved
+
+    def test_empty_seed_raises(self, transfer_svc_tree):
+        src = transfer_svc_tree / "src"
+        from ff_explorer.core import EmptySeedError
+        with pytest.raises(EmptySeedError):
+            service.copy_entries(str(src), 1, "",
+                                 destination=str(transfer_svc_tree / "dest"))
+
+    def test_no_confirm_raises(self, transfer_svc_tree):
+        src = transfer_svc_tree / "src"
+        with pytest.raises(ValueError):
+            service.copy_entries(str(src), 1, "alpha",
+                                 destination=str(transfer_svc_tree / "dest"),
+                                 dry_run=False, confirm=False)
+
+    def test_transfer_report_in_all(self):
+        assert "TransferReport" in service.__all__
+        assert "copy_entries" in service.__all__
+        assert "move_entries" in service.__all__
+
+
+class TestServiceMoveEntries:
+    """service.move_entries passthroughs and gate forwarding."""
+
+    def test_dry_run_default_moves_nothing(self, transfer_svc_tree):
+        src = transfer_svc_tree / "src"
+        dest = transfer_svc_tree / "dest"
+        report = service.move_entries(str(src), 1, "alpha",
+                                      destination=str(dest))
+        assert report.dry_run is True
+        assert report.transferred == []
+        assert (src / "alpha.txt").exists()
+
+    def test_live_move_original_gone(self, transfer_svc_tree):
+        src = transfer_svc_tree / "src"
+        dest = transfer_svc_tree / "dest"
+        service.move_entries(str(src), 1, "alpha",
+                             destination=str(dest), dry_run=False, confirm=True)
+        assert not (src / "alpha.txt").exists()
+        assert (dest / "alpha.txt").exists()
+
+    def test_empty_seed_raises(self, transfer_svc_tree):
+        src = transfer_svc_tree / "src"
+        from ff_explorer.core import EmptySeedError
+        with pytest.raises(EmptySeedError):
+            service.move_entries(str(src), 1, "",
+                                 destination=str(transfer_svc_tree / "dest"))
+
+    def test_no_confirm_raises(self, transfer_svc_tree):
+        src = transfer_svc_tree / "src"
+        with pytest.raises(ValueError):
+            service.move_entries(str(src), 1, "alpha",
+                                 destination=str(transfer_svc_tree / "dest"),
+                                 dry_run=False, confirm=False)
