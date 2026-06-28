@@ -71,7 +71,7 @@ from __future__ import annotations
 import gc
 from pathlib import Path
 
-from PySide6.QtCore import QDate, QDateTime, Qt, QTimeZone
+from PySide6.QtCore import QDate, QDateTime, QObject, QThread, Qt, QTimeZone, Signal
 from PySide6.QtGui import QIcon, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -91,6 +91,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QMainWindow,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QRadioButton,
     QSizePolicy,
@@ -107,7 +108,9 @@ from ff_explorer.gui.widget_info import info_text, register_info, register_info_
 from ff_explorer import (
     EmptySeedError,
     EntryKind,
+    MatchEntry,
     compress_entries,
+    iter_entries,
     list_entries,
     remove_entries,
     save_listing,
@@ -118,6 +121,97 @@ from ff_explorer.rename import RenameRule, rename_entries
 from ff_explorer.presets import Preset, get_preset, list_presets, save_preset
 from ff_explorer.index import IndexManager
 from ff_explorer.gui._resources import resource_path
+
+
+# ---------------------------------------------------------------------------
+# Off-thread scan worker (SPEC-14)
+# ---------------------------------------------------------------------------
+
+# Number of entries between progress() signal emissions during the scan.
+_PROGRESS_INTERVAL = 50
+
+
+class _ScanWorker(QObject):
+    """Consumes :func:`iter_entries` on a background QThread.
+
+    Communicates exclusively via Qt signals — no QWidget access ever occurs
+    from the worker thread.  The worker is designed to be moved onto a QThread
+    via ``moveToThread``; its ``run`` slot is invoked by connecting it to the
+    thread's ``started`` signal.
+
+    Signals
+    -------
+    progress(int count, str current_path)
+        Emitted every ``_PROGRESS_INTERVAL`` entries during the scan.
+        ``count`` is the number of entries collected so far; ``current_path``
+        is the string representation of the most-recently yielded entry.
+    finished(list)
+        Emitted when the scan completes normally (not cancelled).
+        Carries the full list of :class:`MatchEntry` objects.
+    error(object)
+        Emitted when the generator raises an exception.
+        Carries the exception instance so the main thread can handle it.
+
+    Cancel contract
+    ---------------
+    Call :meth:`cancel` from the main thread at any time before or during the
+    scan.  The worker checks the flag between every ``yield``; once cancelled,
+    neither ``finished`` nor ``error`` is emitted — the worker returns silently.
+    Cancellation targets only the *scan/preview* phase.  A confirmed mutation
+    (dry_run=False) is never launched from this worker, so there is nothing
+    to cancel there.
+    """
+
+    progress = Signal(int, str)
+    finished = Signal(list)
+    error = Signal(object)
+
+    def __init__(
+        self,
+        path: str,
+        kind: EntryKind,
+        seed: str,
+        list_kwargs: dict,
+    ) -> None:
+        super().__init__()
+        self._path = path
+        self._kind = kind
+        self._seed = seed
+        self._list_kwargs = list_kwargs
+        self._cancelled: bool = False
+
+    # ------------------------------------------------------------------
+    # Public API — called from the main thread only
+    # ------------------------------------------------------------------
+
+    def cancel(self) -> None:
+        """Set the cooperative cancel flag.  Thread-safe (simple bool write)."""
+        self._cancelled = True
+
+    # ------------------------------------------------------------------
+    # Slot — invoked by QThread.started signal on the worker thread
+    # ------------------------------------------------------------------
+
+    def run(self) -> None:
+        """Consume ``iter_entries`` and emit progress/finished/error.
+
+        No QWidget access occurs here.  All results are marshalled to the
+        main thread via signals.
+        """
+        try:
+            collected: list[MatchEntry] = []
+            gen = iter_entries(self._path, self._kind, self._seed, **self._list_kwargs)
+            for entry in gen:
+                if self._cancelled:
+                    return  # silent exit — neither finished nor error emitted
+                collected.append(entry)
+                if len(collected) % _PROGRESS_INTERVAL == 0:
+                    self.progress.emit(len(collected), str(entry.path))
+            if not self._cancelled:
+                self.finished.emit(collected)
+        except Exception as exc:  # noqa: BLE001
+            if not self._cancelled:
+                self.error.emit(exc)
 
 
 # ---------------------------------------------------------------------------
@@ -802,15 +896,21 @@ class MainWindow(QMainWindow):
 
     def _run(self) -> None:
         """
-        Validate inputs and dispatch to the appropriate core function.
+        Validate inputs and start an off-thread scan (SPEC-14).
 
-        Validate inputs and dispatch to the core, with the safety gate preserved:
-          - Destructive ops (Remove / Compress) always call the core with
-            dry_run=True first, display the preview list, and only proceed on
-            explicit user confirmation.
-          - EmptySeedError is surfaced as a QMessageBox.warning.
-          - ValueError (including invalid regex from core) is surfaced as a
-            QMessageBox.warning with the error text.
+        Input validation is performed synchronously on the main thread.
+        The actual scan is delegated to a ``_ScanWorker`` moved onto a
+        ``QThread``; a ``QProgressDialog`` keeps the window responsive and
+        lets the user cancel.
+
+        Safety gate is preserved:
+          - The worker always performs the *scan* phase only.
+          - For Remove/Compress, the main thread shows the dry-run preview
+            and only on explicit Yes performs the mutation (inline, on the
+            main thread, after ``QMessageBox.question`` returns).
+          - EmptySeedError / ContentSearchUngatedError / ValueError / OSError
+            from the worker are routed back via the ``error`` signal and
+            surfaced by the same ``QMessageBox`` calls as before.
         """
         # --- Input validation (mirrors legacy accept() guards) ---
         path_text = self._path_edit.text()
@@ -829,17 +929,93 @@ class MainWindow(QMainWindow):
         seed = self._seed_edit.text()
         entry_label = "file" if kind == EntryKind.FILES else "folder"
 
-        try:
-            if action_code == 1:
-                self._do_save(path, kind, seed, entry_label)
-            elif action_code == 2:
-                self._do_remove(path, kind, seed, entry_label)
-            elif action_code == 3:
-                self._do_compress(path, kind, seed, entry_label)
+        self._start_scan(action_code, path, kind, seed, entry_label)
 
-        except EmptySeedError as exc:
+    # ------------------------------------------------------------------
+    # Off-thread scan orchestration (SPEC-14)
+    # ------------------------------------------------------------------
+
+    def _start_scan(
+        self,
+        action_code: int,
+        path: str,
+        kind: EntryKind,
+        seed: str,
+        entry_label: str,
+    ) -> None:
+        """Launch a ``_ScanWorker`` on a background ``QThread``.
+
+        Shows a ``QProgressDialog`` with a Cancel button that sets the
+        worker's cooperative cancel flag.  Wires ``finished`` and ``error``
+        signals to main-thread handlers that complete the action.  The
+        thread and worker are cleaned up automatically on completion.
+        """
+        list_kwargs = self._build_list_entries_kwargs()
+
+        # Build the worker and move it to a background thread.
+        worker = _ScanWorker(path, kind, seed, list_kwargs)
+        thread = QThread(self)
+        worker.moveToThread(thread)
+
+        # ---- Progress dialog ----
+        progress_dlg = QProgressDialog(
+            f"Scanning for {entry_label}(s)…",
+            "Cancel",
+            0,
+            0,          # maximum=0 → indeterminate busy bar
+            self,
+        )
+        progress_dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        progress_dlg.setMinimumDuration(0)  # show immediately
+        progress_dlg.setValue(0)
+
+        # Cancel button wires the worker's cooperative flag.
+        # Note: ``canceled`` (US spelling) is the PySide6 signal name.
+        progress_dlg.canceled.connect(worker.cancel)
+
+        # ---- Update progress label on each progress emission ----
+        def _on_progress(count: int, current: str) -> None:
+            progress_dlg.setLabelText(
+                f"Scanning for {entry_label}(s)… {count} found\n{current}"
+            )
+
+        # ---- Finished: close progress dialog, then dispatch post-scan action ----
+        def _on_finished(entries: list) -> None:
+            progress_dlg.close()
+            _cleanup()
+            self._on_scan_complete(action_code, path, kind, seed, entry_label, entries)
+
+        # ---- Error: close progress dialog, surface the exception ----
+        def _on_error(exc: object) -> None:
+            progress_dlg.close()
+            _cleanup()
+            self._handle_scan_error(exc)
+
+        # ---- Thread lifecycle cleanup ----
+        def _cleanup() -> None:
+            thread.quit()
+            thread.wait()
+            # Lifecycle tidiness: drop the worker and thread once the thread has
+            # fully stopped (wait() guarantees run() returned — no use-after-free).
+            worker.deleteLater()
+            thread.deleteLater()
+
+        # Wire signals (all delivered on the main thread via the Qt event loop).
+        worker.progress.connect(_on_progress)
+        worker.finished.connect(_on_finished)
+        worker.error.connect(_on_error)
+
+        # Start thread → triggers worker.run() via started signal.
+        thread.started.connect(worker.run)
+        thread.start()
+
+        progress_dlg.exec()   # enters a local event loop; returns when closed
+
+    def _handle_scan_error(self, exc: object) -> None:
+        """Route worker error signal back to the same QMessageBox handlers as before."""
+        if isinstance(exc, EmptySeedError):
             QMessageBox.warning(self, "Empty seed", str(exc))
-        except ContentSearchUngatedError as exc:
+        elif isinstance(exc, ContentSearchUngatedError):
             QMessageBox.warning(
                 self,
                 "Content search requires a pre-filter",
@@ -851,51 +1027,85 @@ class MainWindow(QMainWindow):
                     f"Details: {exc}"
                 ),
             )
-        except ValueError as exc:
+        elif isinstance(exc, ValueError):
             QMessageBox.warning(self, "Invalid input", str(exc))
-        except OSError as exc:
+        elif isinstance(exc, OSError):
             QMessageBox.critical(self, "File system error", str(exc))
+        else:
+            QMessageBox.critical(self, "Unexpected error", str(exc))
+
+    def _on_scan_complete(
+        self,
+        action_code: int,
+        path: str,
+        kind: EntryKind,
+        seed: str,
+        entry_label: str,
+        entries: list[MatchEntry],
+    ) -> None:
+        """Dispatch to the correct post-scan handler on the main thread."""
+        if action_code == 1:
+            self._do_save(path, kind, seed, entry_label, entries)
+        elif action_code == 2:
+            self._do_remove(path, kind, seed, entry_label, entries)
+        elif action_code == 3:
+            self._do_compress(path, kind, seed, entry_label, entries)
 
     # ------------------------------------------------------------------
-    # Action helpers (called from _run)
+    # Action helpers (called from _on_scan_complete — main thread only)
     # ------------------------------------------------------------------
 
-    def _do_save(self, path: str, kind: EntryKind, seed: str, entry_label: str) -> None:
+    def _do_save(
+        self,
+        path: str,
+        kind: EntryKind,
+        seed: str,
+        entry_label: str,
+        entries: list[MatchEntry],
+    ) -> None:
         """Save list — low risk, no confirmation required.
 
-        Passes case_sensitive to save_listing; passes all filter params to the
-        supplementary list_entries call used for the result count.
+        Receives the pre-scanned *entries* from the worker so the save call
+        never re-scans the tree.  Passes case_sensitive to save_listing.
         """
         core_kwargs = self._build_core_kwargs()
-        list_kwargs = self._build_list_entries_kwargs()
         out_path = save_listing(path, kind, seed, **core_kwargs)
-        entries = list_entries(path, kind, seed, **list_kwargs)
         if entries:
             self._set_status(f"Directory saved to {out_path}.")
         else:
             self._set_status(f"No {entry_label} was found — nothing was saved.")
 
-    def _do_remove(self, path: str, kind: EntryKind, seed: str, entry_label: str) -> None:
+    def _do_remove(
+        self,
+        path: str,
+        kind: EntryKind,
+        seed: str,
+        entry_label: str,
+        entries: list[MatchEntry],
+    ) -> None:
         """
-        Remove list — SAFETY GATE:
-          1. Dry-run to get the preview list.
-          2. Show confirmation dialog with the matched paths.
-          3. Only on Yes: call with dry_run=False, confirm=True.
+        Remove list — SAFETY GATE (SPEC-14 update):
+          1. The off-thread worker already scanned and collected matched entries
+             (scan played the role of the dry-run preview).
+          2. Show confirmation dialog with the matched paths (main thread).
+          3. Only on Yes: call remove_entries(dry_run=False, confirm=True) on the
+             main thread.  Cancel of a *confirmed* mutation is out of scope; the
+             scan/preview phase is the only cancellable step.
 
         Passes case_sensitive to remove_entries.
         Passes versioning=True when the versioning checkbox is checked (FFX-I08).
         """
+        if not entries:
+            self._set_status(f"No {entry_label} was found — nothing was deleted.")
+            return
+
         core_kwargs = self._build_core_kwargs()
         versioning = self._versioning_check.isChecked()
         if versioning:
             core_kwargs["versioning"] = True
 
-        preview = remove_entries(path, kind, seed, dry_run=True, **core_kwargs)
-        if not preview.matched:
-            self._set_status(f"No {entry_label} was found — nothing was deleted.")
-            return
-
-        preview_text = self._build_preview_text(preview.matched, entry_label)
+        matched_paths = [e.path for e in entries]
+        preview_text = self._build_preview_text(matched_paths, entry_label)
         versioning_note = (
             "\n\nFiles will be moved to .ffe-versions/ (recoverable)."
             if versioning else
@@ -906,7 +1116,7 @@ class MainWindow(QMainWindow):
             "Confirm removal",
             (
                 f"About to remove "
-                f"{len(preview.matched)} {entry_label}(s):\n\n"
+                f"{len(entries)} {entry_label}(s):\n\n"
                 f"{preview_text}\n\nProceed?{versioning_note}"
             ),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
@@ -923,28 +1133,36 @@ class MainWindow(QMainWindow):
         else:
             self._set_status("Removal cancelled.")
 
-    def _do_compress(self, path: str, kind: EntryKind, seed: str, entry_label: str) -> None:
+    def _do_compress(
+        self,
+        path: str,
+        kind: EntryKind,
+        seed: str,
+        entry_label: str,
+        entries: list[MatchEntry],
+    ) -> None:
         """
-        Compress list — SAFETY GATE (same pattern as _do_remove):
-          1. Dry-run to get the preview list.
-          2. Show confirmation dialog (note: originals are deleted after compression).
-          3. Only on Yes: call with dry_run=False, confirm=True.
+        Compress list — SAFETY GATE (SPEC-14 update, same pattern as _do_remove):
+          1. The off-thread worker already scanned and collected matched entries.
+          2. Show confirmation dialog on the main thread (originals deleted after
+             compression — note this clearly).
+          3. Only on Yes: call compress_entries(dry_run=False, confirm=True) on the
+             main thread.
 
-        Passes case_sensitive to compress_entries (which does not expose
-        structured filters yet).
+        Passes case_sensitive to compress_entries.
         """
-        core_kwargs = self._build_core_kwargs()
-        preview = compress_entries(path, kind, seed, dry_run=True, **core_kwargs)
-        if not preview.matched:
+        if not entries:
             self._set_status(f"No {entry_label} was found — nothing was compressed.")
             return
 
-        preview_text = self._build_preview_text(preview.matched, entry_label)
+        core_kwargs = self._build_core_kwargs()
+        matched_paths = [e.path for e in entries]
+        preview_text = self._build_preview_text(matched_paths, entry_label)
         reply = QMessageBox.question(
             self,
             "Confirm compression",
             (
-                f"About to compress {len(preview.matched)} {entry_label}(s):\n\n"
+                f"About to compress {len(entries)} {entry_label}(s):\n\n"
                 f"{preview_text}\n\n"
                 "Originals will be deleted after compression.  Proceed?"
             ),

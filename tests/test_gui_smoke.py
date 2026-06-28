@@ -82,30 +82,34 @@ class TestDestructiveSafetyGateDefaultsNo:
     dry_run=False, confirm=True) must NOT be invoked.
     """
 
-    def _make_remove_preview(self, tmp_path: Path):
-        """Return a fake dry-run preview report with one matched entry."""
-        from ff_explorer.core import RemovalReport
+    def _make_match_entries(self, tmp_path: Path) -> list:
+        """Return a list with one MatchEntry for a real file in tmp_path."""
+        from ff_explorer import MatchEntry, EntryKind
         fake_path = tmp_path / "target.txt"
         fake_path.write_text("x")
-        report = RemovalReport(matched=[fake_path])
-        return report
+        return [MatchEntry(path=fake_path, kind=EntryKind.FILES)]
 
     def test_remove_dialog_default_no_skips_destructive_call(self, qapp, tmp_path):
         """
         _do_remove: when QMessageBox.question returns No, the live
         remove_entries(dry_run=False, confirm=True) is never called.
+
+        SPEC-14: _do_remove now receives the pre-scanned entries list from the
+        worker (no dry-run inside _do_remove itself).  The safety gate is the
+        QMessageBox.question defaulting to No.
         """
         win = MainWindow()
         try:
-            preview_report = self._make_remove_preview(tmp_path)
+            entries = self._make_match_entries(tmp_path)
 
             calls = []
 
-            def fake_remove(path, kind, seed, dry_run=True, confirm=False):
+            def fake_remove(path, kind, seed, dry_run=True, confirm=False, **kwargs):
                 calls.append({"dry_run": dry_run, "confirm": confirm})
-                if dry_run:
-                    return preview_report
-                raise AssertionError("Destructive remove must not be called when user clicks No")
+                if not dry_run:
+                    raise AssertionError("Destructive remove must not be called when user clicks No")
+                from ff_explorer.core import RemovalReport
+                return RemovalReport(matched=[e.path for e in entries])
 
             with (
                 patch("ff_explorer.gui.main_window.remove_entries", side_effect=fake_remove),
@@ -114,12 +118,10 @@ class TestDestructiveSafetyGateDefaultsNo:
                     return_value=QMessageBox.StandardButton.No,
                 ),
             ):
-                win._do_remove(str(tmp_path), win._current_kind(), "target", "file")
+                win._do_remove(str(tmp_path), win._current_kind(), "target", "file", entries)
 
-            # Dry-run preview call must have occurred; destructive call must NOT.
-            dry_run_calls = [c for c in calls if c["dry_run"]]
+            # Only the confirmation dialog was shown; no destructive call must occur.
             destructive_calls = [c for c in calls if not c["dry_run"]]
-            assert len(dry_run_calls) == 1, "Expected exactly one dry-run preview call"
             assert len(destructive_calls) == 0, (
                 "Destructive remove_entries(dry_run=False) must not be called when dialog returns No"
             )
@@ -131,21 +133,24 @@ class TestDestructiveSafetyGateDefaultsNo:
         """
         _do_compress: when QMessageBox.question returns No, the live
         compress_entries(dry_run=False, confirm=True) is never called.
+
+        SPEC-14: _do_compress now receives the pre-scanned entries list.
         """
         win = MainWindow()
         try:
-            from ff_explorer.core import CompressionReport
+            from ff_explorer import MatchEntry, EntryKind
             fake_path = tmp_path / "target_folder"
             fake_path.mkdir()
-            preview_report = CompressionReport(matched=[fake_path])
+            entries = [MatchEntry(path=fake_path, kind=EntryKind.FOLDERS)]
 
             calls = []
 
-            def fake_compress(path, kind, seed, dry_run=True, confirm=False):
+            def fake_compress(path, kind, seed, dry_run=True, confirm=False, **kwargs):
                 calls.append({"dry_run": dry_run, "confirm": confirm})
-                if dry_run:
-                    return preview_report
-                raise AssertionError("Destructive compress must not be called when user clicks No")
+                if not dry_run:
+                    raise AssertionError("Destructive compress must not be called when user clicks No")
+                from ff_explorer.core import CompressionReport
+                return CompressionReport(matched=[fake_path])
 
             with (
                 patch("ff_explorer.gui.main_window.compress_entries", side_effect=fake_compress),
@@ -154,11 +159,9 @@ class TestDestructiveSafetyGateDefaultsNo:
                     return_value=QMessageBox.StandardButton.No,
                 ),
             ):
-                win._do_compress(str(tmp_path), win._current_kind(), "target", "folder")
+                win._do_compress(str(tmp_path), win._current_kind(), "target", "folder", entries)
 
-            dry_run_calls = [c for c in calls if c["dry_run"]]
             destructive_calls = [c for c in calls if not c["dry_run"]]
-            assert len(dry_run_calls) == 1, "Expected exactly one dry-run preview call"
             assert len(destructive_calls) == 0, (
                 "Destructive compress_entries(dry_run=False) must not be called when dialog returns No"
             )
@@ -173,17 +176,18 @@ class TestDestructiveSafetyGateDefaultsNo:
         """
         win = MainWindow()
         try:
+            from ff_explorer import MatchEntry, EntryKind
             from ff_explorer.core import RemovalReport
             fake_path = tmp_path / "yes_target.txt"
             fake_path.write_text("x")
-            preview_report = RemovalReport(matched=[fake_path])
+            entries = [MatchEntry(path=fake_path, kind=EntryKind.FILES)]
             live_report = RemovalReport(matched=[fake_path], removed=[fake_path])
 
             calls = []
 
-            def fake_remove(path, kind, seed, dry_run=True, confirm=False):
+            def fake_remove(path, kind, seed, dry_run=True, confirm=False, **kwargs):
                 calls.append({"dry_run": dry_run, "confirm": confirm})
-                return preview_report if dry_run else live_report
+                return live_report
 
             with (
                 patch("ff_explorer.gui.main_window.remove_entries", side_effect=fake_remove),
@@ -192,7 +196,7 @@ class TestDestructiveSafetyGateDefaultsNo:
                     return_value=QMessageBox.StandardButton.Yes,
                 ),
             ):
-                win._do_remove(str(tmp_path), win._current_kind(), "yes_target", "file")
+                win._do_remove(str(tmp_path), win._current_kind(), "yes_target", "file", entries)
 
             destructive_calls = [c for c in calls if not c["dry_run"]]
             assert len(destructive_calls) == 1, (
@@ -840,71 +844,79 @@ class TestFilterToggle:
 # ---------------------------------------------------------------------------
 
 class TestRunPassesFilterKwargs:
-    """A6: When Run is triggered with non-default filters, list_entries receives them."""
+    """A6: When Run is triggered with non-default filters, save_listing / iter_entries
+    receive the correct kwargs.
+
+    SPEC-14: _do_save no longer calls list_entries itself — the entries list is
+    delivered by the _ScanWorker (which calls iter_entries).  The _do_save method
+    only calls save_listing.  Filter-param correctness for the scan side is
+    verified via _build_list_entries_kwargs() in TestFilterParamAssembly (A5b).
+    """
 
     def test_run_save_passes_match_mode_regex_to_list_entries(self, qapp, tmp_path):
-        """_do_save passes match_mode='regex' to list_entries when Regex is selected."""
+        """_build_list_entries_kwargs passes match_mode='regex' when Regex is selected.
+
+        SPEC-14 adaptation: _do_save no longer calls list_entries directly; the
+        worker uses iter_entries with _build_list_entries_kwargs().  We verify
+        _do_save calls save_listing correctly and uses the passed entries list
+        (the match_mode kwarg is verified via _build_list_entries_kwargs in A5b).
+        """
+        from ff_explorer import MatchEntry, EntryKind
         win = MainWindow()
         try:
             idx = [win._match_mode_combo.itemText(i)
                    for i in range(win._match_mode_combo.count())].index("Regex")
             win._match_mode_combo.setCurrentIndex(idx)
 
-            captured = {}
-
-            def fake_list_entries(path, kind, seed, **kwargs):
-                captured.update(kwargs)
-                return []
+            save_called = []
 
             def fake_save_listing(path, kind, seed, **kwargs):
+                save_called.append(kwargs)
                 return tmp_path / "out.txt"
 
-            with (
-                patch("ff_explorer.gui.main_window.list_entries",
-                      side_effect=fake_list_entries),
-                patch("ff_explorer.gui.main_window.save_listing",
-                      side_effect=fake_save_listing),
-            ):
-                win._do_save(str(tmp_path), win._current_kind(), ".*", "file")
+            # Pre-built entries list (as the worker would supply)
+            fake_entry = MatchEntry(path=tmp_path / "match.txt", kind=EntryKind.FILES)
+            entries = [fake_entry]
 
-            assert captured.get("match_mode") == "regex", (
-                "_do_save must pass match_mode='regex' to list_entries "
-                "when Regex mode is selected"
+            with patch("ff_explorer.gui.main_window.save_listing",
+                       side_effect=fake_save_listing):
+                win._do_save(str(tmp_path), win._current_kind(), ".*", "file", entries)
+
+            assert len(save_called) == 1, "_do_save must call save_listing exactly once"
+            # Verify _build_list_entries_kwargs reflects Regex selection
+            kwargs = win._build_list_entries_kwargs()
+            assert kwargs.get("match_mode") == "regex", (
+                "_build_list_entries_kwargs must include match_mode='regex' when Regex selected"
             )
         finally:
             win.close()
             win.deleteLater()
 
     def test_run_save_passes_case_insensitive_when_unchecked(self, qapp, tmp_path):
-        """_do_save passes case_sensitive=False to save_listing and list_entries."""
+        """_do_save passes case_sensitive=False to save_listing.
+
+        SPEC-14: _do_save no longer calls list_entries; it calls save_listing
+        with core_kwargs (which includes case_sensitive).
+        """
+        from ff_explorer import MatchEntry, EntryKind
         win = MainWindow()
         try:
             win._case_sensitive_check.setChecked(False)
 
             save_kwargs: dict = {}
-            list_kwargs: dict = {}
 
             def fake_save_listing(path, kind, seed, **kwargs):
                 save_kwargs.update(kwargs)
                 return tmp_path / "out.txt"
 
-            def fake_list_entries(path, kind, seed, **kwargs):
-                list_kwargs.update(kwargs)
-                return []
+            entries: list = []  # empty — nothing was scanned in this focused test
 
-            with (
-                patch("ff_explorer.gui.main_window.save_listing",
-                      side_effect=fake_save_listing),
-                patch("ff_explorer.gui.main_window.list_entries",
-                      side_effect=fake_list_entries),
-            ):
-                win._do_save(str(tmp_path), win._current_kind(), "test", "file")
+            with patch("ff_explorer.gui.main_window.save_listing",
+                       side_effect=fake_save_listing):
+                win._do_save(str(tmp_path), win._current_kind(), "test", "file", entries)
 
             assert save_kwargs.get("case_sensitive") is False, (
                 "case_sensitive=False must be passed to save_listing"
-            )
-            assert list_kwargs.get("case_sensitive") is False, (
-                "case_sensitive=False must be passed to list_entries"
             )
         finally:
             win.close()
@@ -912,6 +924,7 @@ class TestRunPassesFilterKwargs:
 
     def test_run_save_default_filters_no_extra_kwargs(self, qapp, tmp_path):
         """_do_save with default filters passes no extra kwargs to save_listing."""
+        from ff_explorer import MatchEntry, EntryKind
         win = MainWindow()
         try:
             save_kwargs: dict = {}
@@ -920,16 +933,11 @@ class TestRunPassesFilterKwargs:
                 save_kwargs.update(kwargs)
                 return tmp_path / "out.txt"
 
-            def fake_list_entries(path, kind, seed, **kwargs):
-                return []
+            entries: list = []
 
-            with (
-                patch("ff_explorer.gui.main_window.save_listing",
-                      side_effect=fake_save_listing),
-                patch("ff_explorer.gui.main_window.list_entries",
-                      side_effect=fake_list_entries),
-            ):
-                win._do_save(str(tmp_path), win._current_kind(), "test", "file")
+            with patch("ff_explorer.gui.main_window.save_listing",
+                       side_effect=fake_save_listing):
+                win._do_save(str(tmp_path), win._current_kind(), "test", "file", entries)
 
             assert save_kwargs == {}, (
                 "Default filters must produce no extra kwargs to save_listing"
@@ -939,40 +947,23 @@ class TestRunPassesFilterKwargs:
             win.deleteLater()
 
     def test_invalid_regex_surfaced_as_warning_not_crash(self, qapp, tmp_path):
-        """An invalid regex raises ValueError from core, shown as QMessageBox.warning."""
+        """An invalid regex ValueError from the worker is shown as QMessageBox.warning.
+
+        SPEC-14: the worker emits error(exc); the main-thread handler
+        _handle_scan_error routes it to QMessageBox.warning.  We test
+        _handle_scan_error directly here (the threading + exec() path is
+        covered by TestScanWorker.test_worker_emits_error_on_exception).
+        """
         win = MainWindow()
         try:
-            idx = [win._match_mode_combo.itemText(i)
-                   for i in range(win._match_mode_combo.count())].index("Regex")
-            win._match_mode_combo.setCurrentIndex(idx)
-
-            win._path_edit.setText(str(tmp_path))
-            win._action_combo.setCurrentIndex(
-                list(win._action_combo.itemText(i)
-                     for i in range(win._action_combo.count())).index("Save list")
-            )
-            win._seed_edit.setText("[invalid(")
-
             warning_shown = []
-
-            def fake_list_entries(path, kind, seed, **kwargs):
-                raise ValueError("bad regex: [invalid(")
-
-            def fake_save_listing(path, kind, seed, **kwargs):
-                return tmp_path / "out.txt"
 
             def fake_warning(parent, title, message, *args, **kwargs):
                 warning_shown.append({"title": title, "message": message})
 
-            with (
-                patch("ff_explorer.gui.main_window.list_entries",
-                      side_effect=fake_list_entries),
-                patch("ff_explorer.gui.main_window.save_listing",
-                      side_effect=fake_save_listing),
-                patch("ff_explorer.gui.main_window.QMessageBox.warning",
-                      side_effect=fake_warning),
-            ):
-                win._run()
+            with patch("ff_explorer.gui.main_window.QMessageBox.warning",
+                       side_effect=fake_warning):
+                win._handle_scan_error(ValueError("bad regex: [invalid("))
 
             assert len(warning_shown) > 0, (
                 "An invalid regex ValueError must be surfaced as QMessageBox.warning"
@@ -987,29 +978,35 @@ class TestRunPassesFilterKwargs:
             win.deleteLater()
 
     def test_run_remove_passes_case_sensitive_to_remove_entries(self, qapp, tmp_path):
-        """_do_remove passes case_sensitive=False to remove_entries when unchecked."""
+        """_do_remove passes case_sensitive=False to remove_entries when unchecked.
+
+        SPEC-14: _do_remove now receives the pre-scanned entries list; the
+        case_sensitive kwarg is forwarded to the destructive call on Yes.
+        """
+        from ff_explorer import MatchEntry, EntryKind
         from ff_explorer.core import RemovalReport
         win = MainWindow()
         try:
             win._case_sensitive_check.setChecked(False)
             fake_path = tmp_path / "target.txt"
             fake_path.write_text("x")
-            preview_report = RemovalReport(matched=[fake_path])
+            entries = [MatchEntry(path=fake_path, kind=EntryKind.FILES)]
+            live_report = RemovalReport(matched=[fake_path], removed=[fake_path])
 
             remove_kwargs: dict = {}
 
             def fake_remove(path, kind, seed, dry_run=True, confirm=False, **kwargs):
                 remove_kwargs.update(kwargs)
                 remove_kwargs["dry_run"] = dry_run
-                return preview_report
+                return live_report
 
             with (
                 patch("ff_explorer.gui.main_window.remove_entries",
                       side_effect=fake_remove),
                 patch("ff_explorer.gui.main_window.QMessageBox.question",
-                      return_value=QMessageBox.StandardButton.No),
+                      return_value=QMessageBox.StandardButton.Yes),
             ):
-                win._do_remove(str(tmp_path), win._current_kind(), "target", "file")
+                win._do_remove(str(tmp_path), win._current_kind(), "target", "file", entries)
 
             assert remove_kwargs.get("case_sensitive") is False, (
                 "_do_remove must pass case_sensitive=False to remove_entries"
@@ -1314,38 +1311,25 @@ class TestContentSearch:
             win.deleteLater()
 
     def test_ungated_content_search_shows_friendly_warning(self, qapp, tmp_path):
-        """ContentSearchUngatedError from core is caught and shown as QMessageBox.warning
-        with a clear, friendly message — no crash."""
+        """ContentSearchUngatedError from the worker is shown as QMessageBox.warning
+        with a clear, friendly message — no crash.
+
+        SPEC-14: the worker emits error(exc); _handle_scan_error routes it to
+        QMessageBox.warning.  We test _handle_scan_error directly here to avoid
+        the QProgressDialog.exec() nested-event-loop complexity in headless tests
+        (the threading path is covered by TestScanWorker.test_worker_emits_error_on_exception).
+        """
         from ff_explorer.core import ContentSearchUngatedError as _CSUE
         win = MainWindow()
         try:
-            win._path_edit.setText(str(tmp_path))
-            action_items = [
-                win._action_combo.itemText(i)
-                for i in range(win._action_combo.count())
-            ]
-            win._action_combo.setCurrentIndex(action_items.index("Save list"))
-            win._seed_edit.setText("")  # empty seed — list_entries accepts it
-            win._content_query_edit.setText("some content")
-
             warned = []
-
-            def fake_save(path, kind, seed, **kwargs):
-                return tmp_path / "out.txt"
-
-            def fake_list(path, kind, seed, **kwargs):
-                raise _CSUE()
 
             def fake_warning(parent, title, msg, *a, **kw):
                 warned.append({"title": title, "msg": msg})
 
-            with (
-                patch("ff_explorer.gui.main_window.save_listing", side_effect=fake_save),
-                patch("ff_explorer.gui.main_window.list_entries", side_effect=fake_list),
-                patch("ff_explorer.gui.main_window.QMessageBox.warning",
-                      side_effect=fake_warning),
-            ):
-                win._run()
+            with patch("ff_explorer.gui.main_window.QMessageBox.warning",
+                       side_effect=fake_warning):
+                win._handle_scan_error(_CSUE())
 
             assert len(warned) >= 1, (
                 "ContentSearchUngatedError must surface as QMessageBox.warning"
@@ -1504,13 +1488,18 @@ class TestVersioningCheckbox:
             win.deleteLater()
 
     def test_versioning_checked_passes_versioning_true_to_remove(self, qapp, tmp_path):
-        """_do_remove with versioning checked passes versioning=True to remove_entries."""
+        """_do_remove with versioning checked passes versioning=True to remove_entries.
+
+        SPEC-14: _do_remove receives the pre-scanned entries list; versioning
+        kwarg is forwarded to the destructive remove_entries call on Yes.
+        """
+        from ff_explorer import MatchEntry, EntryKind
         from ff_explorer.core import RemovalReport
         win = MainWindow()
         try:
             fake_target = tmp_path / "old_file.txt"
             fake_target.write_text("x")
-            preview = RemovalReport(matched=[fake_target])
+            entries = [MatchEntry(path=fake_target, kind=EntryKind.FILES)]
             live_report = RemovalReport(matched=[fake_target], removed=[fake_target])
 
             captured_kwargs: dict = {}
@@ -1518,7 +1507,7 @@ class TestVersioningCheckbox:
             def fake_remove(path, kind, seed, dry_run=True, confirm=False, **kwargs):
                 captured_kwargs.update(kwargs)
                 captured_kwargs["dry_run"] = dry_run
-                return preview if dry_run else live_report
+                return live_report
 
             win._versioning_check.setChecked(True)
 
@@ -1529,7 +1518,7 @@ class TestVersioningCheckbox:
                     return_value=QMessageBox.StandardButton.Yes,
                 ),
             ):
-                win._do_remove(str(tmp_path), win._current_kind(), "old_file", "file")
+                win._do_remove(str(tmp_path), win._current_kind(), "old_file", "file", entries)
 
             assert captured_kwargs.get("versioning") is True, (
                 "_do_remove with versioning checked must pass versioning=True to remove_entries"
@@ -1539,19 +1528,24 @@ class TestVersioningCheckbox:
             win.deleteLater()
 
     def test_versioning_unchecked_no_versioning_kwarg(self, qapp, tmp_path):
-        """_do_remove with versioning unchecked does NOT pass versioning kwarg."""
+        """_do_remove with versioning unchecked does NOT pass versioning kwarg.
+
+        SPEC-14: entries list passed directly; No dialog means no destructive call.
+        """
+        from ff_explorer import MatchEntry, EntryKind
         from ff_explorer.core import RemovalReport
         win = MainWindow()
         try:
             fake_target = tmp_path / "file.txt"
             fake_target.write_text("x")
-            preview = RemovalReport(matched=[fake_target])
+            entries = [MatchEntry(path=fake_target, kind=EntryKind.FILES)]
+            live_report = RemovalReport(matched=[fake_target], removed=[fake_target])
 
             captured_kwargs: dict = {}
 
             def fake_remove(path, kind, seed, dry_run=True, confirm=False, **kwargs):
                 captured_kwargs.update(kwargs)
-                return preview
+                return live_report
 
             win._versioning_check.setChecked(False)
 
@@ -1559,10 +1553,10 @@ class TestVersioningCheckbox:
                 patch("ff_explorer.gui.main_window.remove_entries", side_effect=fake_remove),
                 patch(
                     "ff_explorer.gui.main_window.QMessageBox.question",
-                    return_value=QMessageBox.StandardButton.No,
+                    return_value=QMessageBox.StandardButton.Yes,
                 ),
             ):
-                win._do_remove(str(tmp_path), win._current_kind(), "file", "file")
+                win._do_remove(str(tmp_path), win._current_kind(), "file", "file", entries)
 
             assert "versioning" not in captured_kwargs, (
                 "_do_remove with unchecked versioning must not pass versioning kwarg"
@@ -1572,13 +1566,16 @@ class TestVersioningCheckbox:
             win.deleteLater()
 
     def test_versioning_gate_still_defaults_to_no(self, qapp, tmp_path):
-        """Even with versioning=True, the confirm dialog must default to No."""
-        from ff_explorer.core import RemovalReport
+        """Even with versioning=True, the confirm dialog must default to No.
+
+        SPEC-14: entries list passed directly; safety gate is unchanged.
+        """
+        from ff_explorer import MatchEntry, EntryKind
         win = MainWindow()
         try:
             fake_target = tmp_path / "versioned.txt"
             fake_target.write_text("x")
-            preview = RemovalReport(matched=[fake_target])
+            entries = [MatchEntry(path=fake_target, kind=EntryKind.FILES)]
 
             destructive_calls = []
 
@@ -1586,7 +1583,8 @@ class TestVersioningCheckbox:
                 if not dry_run:
                     destructive_calls.append(True)
                     raise AssertionError("Must not run destructive when No selected")
-                return preview
+                from ff_explorer.core import RemovalReport
+                return RemovalReport(matched=[fake_target])
 
             win._versioning_check.setChecked(True)
 
@@ -1597,7 +1595,7 @@ class TestVersioningCheckbox:
                     return_value=QMessageBox.StandardButton.No,
                 ),
             ):
-                win._do_remove(str(tmp_path), win._current_kind(), "versioned", "file")
+                win._do_remove(str(tmp_path), win._current_kind(), "versioned", "file", entries)
 
             assert len(destructive_calls) == 0, (
                 "Versioning remove gate must still default to No — no destructive call"
@@ -2403,3 +2401,266 @@ class TestWidgetRegistryWiring:
         finally:
             win.close()
             win.deleteLater()
+
+
+# ---------------------------------------------------------------------------
+# A17 — SPEC-14: off-thread scan worker (_ScanWorker) correctness
+# ---------------------------------------------------------------------------
+
+class TestScanWorker:
+    """A17: _ScanWorker emits finished with the same entries as a direct
+    iter_entries call; honors cancel; the main window still constructs and
+    a small-tree Run updates status via the worker path.
+
+    All tests run headless under QT_QPA_PLATFORM=offscreen.  Worker signals
+    are waited for by spinning the event loop with a timeout — deterministic,
+    no real sleeps required.
+    """
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _spin_until(condition, timeout_ms: int = 5000) -> bool:
+        """Process Qt events until *condition()* is True or *timeout_ms* elapses.
+
+        Returns True when the condition became True, False on timeout.
+        Uses QApplication.processEvents() in a tight loop with a wall-clock guard
+        so we never block forever in CI and never need real ``time.sleep`` calls.
+        """
+        import time
+        from PySide6.QtWidgets import QApplication
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        while time.monotonic() < deadline:
+            QApplication.processEvents()
+            if condition():
+                return True
+        return False
+
+    # ------------------------------------------------------------------
+    # Worker tests (direct unit tests — no MainWindow needed)
+    # ------------------------------------------------------------------
+
+    def test_worker_finished_matches_direct_iter_entries(self, qapp, tmp_path):
+        """_ScanWorker emits finished with the same entries as iter_entries().
+
+        Build a small tmp tree, run the worker, collect the finished payload,
+        and assert it equals the direct iter_entries result.
+        """
+        from ff_explorer import iter_entries, EntryKind
+        from ff_explorer.gui.main_window import _ScanWorker
+        from PySide6.QtCore import QThread
+
+        # Build a small tree
+        (tmp_path / "alpha.txt").write_bytes(b"a")
+        (tmp_path / "beta.txt").write_bytes(b"b")
+        sub = tmp_path / "sub"
+        sub.mkdir()
+        (sub / "gamma.txt").write_bytes(b"g")
+
+        # Reference result via direct call
+        expected = list(iter_entries(str(tmp_path), EntryKind.FILES, ""))
+        assert len(expected) >= 3, "tmp tree must have at least 3 files"
+
+        # Run the worker
+        finished_payload: list = []
+        error_payload: list = []
+
+        worker = _ScanWorker(str(tmp_path), EntryKind.FILES, "", {})
+        thread = QThread()
+        worker.moveToThread(thread)
+        worker.finished.connect(lambda entries: finished_payload.extend(entries))
+        worker.error.connect(lambda exc: error_payload.append(exc))
+        thread.started.connect(worker.run)
+        thread.start()
+
+        done = self._spin_until(
+            lambda: bool(finished_payload) or bool(error_payload),
+            timeout_ms=5000,
+        )
+        thread.quit()
+        thread.wait()
+
+        assert done, "Worker did not emit finished within 5 s"
+        assert not error_payload, f"Worker emitted error: {error_payload}"
+        assert len(finished_payload) == len(expected), (
+            f"Worker finished payload length {len(finished_payload)} != "
+            f"direct iter_entries length {len(expected)}"
+        )
+        # Paths must match (order may differ on some OSes — compare as sets)
+        finished_paths = {str(e.path) for e in finished_payload}
+        expected_paths = {str(e.path) for e in expected}
+        assert finished_paths == expected_paths, (
+            "Worker finished entries must match direct iter_entries result"
+        )
+
+    def test_worker_cancel_stops_without_finished(self, qapp, tmp_path):
+        """_ScanWorker.cancel() causes the worker to stop without emitting finished.
+
+        Start the worker, cancel immediately, and assert neither finished nor
+        error is emitted (the cooperative cancel flag is checked between yields).
+        """
+        from ff_explorer import EntryKind
+        from ff_explorer.gui.main_window import _ScanWorker
+        from PySide6.QtCore import QThread
+
+        # Build a minimal tree so the worker has something to iterate over
+        (tmp_path / "a.txt").write_bytes(b"a")
+
+        finished_calls: list = []
+        error_calls: list = []
+
+        worker = _ScanWorker(str(tmp_path), EntryKind.FILES, "", {})
+        thread = QThread()
+        worker.moveToThread(thread)
+        worker.finished.connect(lambda e: finished_calls.append(e))
+        worker.error.connect(lambda ex: error_calls.append(ex))
+        thread.started.connect(worker.run)
+
+        # Cancel before starting — the worker sees the flag on its first check
+        worker.cancel()
+        thread.start()
+
+        # Give the thread time to run and confirm it does NOT emit finished
+        import time
+        from PySide6.QtWidgets import QApplication
+        deadline = time.monotonic() + 1.0  # 1 s is plenty for a 1-file tree
+        while time.monotonic() < deadline:
+            QApplication.processEvents()
+        thread.quit()
+        thread.wait()
+
+        assert len(finished_calls) == 0, (
+            "_ScanWorker must NOT emit finished after cancel() is called"
+        )
+        assert len(error_calls) == 0, (
+            "_ScanWorker must NOT emit error after cancel() is called"
+        )
+
+    def test_worker_emits_error_on_exception(self, qapp, tmp_path):
+        """_ScanWorker emits error(exc) when iter_entries raises an exception."""
+        from ff_explorer import EntryKind
+        from ff_explorer.gui.main_window import _ScanWorker
+        from PySide6.QtCore import QThread
+        from unittest.mock import patch
+
+        finished_calls: list = []
+        error_calls: list = []
+
+        worker = _ScanWorker(str(tmp_path), EntryKind.FILES, "", {})
+        thread = QThread()
+        worker.moveToThread(thread)
+        worker.finished.connect(lambda e: finished_calls.append(e))
+        worker.error.connect(lambda ex: error_calls.append(ex))
+
+        def _bad_iter(*a, **kw):
+            raise ValueError("injected error")
+            return iter([])  # type: ignore[misc]
+
+        thread.started.connect(worker.run)
+
+        with patch("ff_explorer.gui.main_window.iter_entries", side_effect=_bad_iter):
+            thread.start()
+            done = self._spin_until(
+                lambda: bool(error_calls) or bool(finished_calls),
+                timeout_ms=3000,
+            )
+        thread.quit()
+        thread.wait()
+
+        assert done, "Worker did not emit error within 3 s"
+        assert len(error_calls) == 1, "Worker must emit exactly one error signal"
+        assert isinstance(error_calls[0], ValueError), (
+            "Emitted error must be the original ValueError"
+        )
+        assert len(finished_calls) == 0, (
+            "Worker must NOT emit finished when it raises"
+        )
+
+    # ------------------------------------------------------------------
+    # End-to-end: MainWindow._run() with worker path
+    # ------------------------------------------------------------------
+
+    def test_main_window_run_save_updates_status_via_worker(self, qapp, tmp_path):
+        """MainWindow._on_scan_complete() with Save action updates the status bar.
+
+        SPEC-14: _on_scan_complete is the post-scan handler called by the finished
+        signal on the main thread.  We drive it directly to avoid the
+        QProgressDialog.exec() nested-event-loop complexity in headless tests
+        (the worker → finished → _on_scan_complete signal chain is separately
+        validated by test_worker_finished_matches_direct_iter_entries).
+
+        Asserts: _do_save is called via _on_scan_complete, save_listing is invoked,
+        and the status bar is updated with a non-empty message.
+        """
+        from ff_explorer import EntryKind, MatchEntry
+        from unittest.mock import patch
+
+        (tmp_path / "hello.txt").write_bytes(b"h")
+        (tmp_path / "world.txt").write_bytes(b"w")
+
+        win = MainWindow()
+        try:
+            win._path_edit.setText(str(tmp_path))
+
+            # Two pre-scanned entries (as the worker would deliver)
+            entries = [
+                MatchEntry(path=tmp_path / "hello.txt", kind=EntryKind.FILES),
+                MatchEntry(path=tmp_path / "world.txt", kind=EntryKind.FILES),
+            ]
+
+            with patch(
+                "ff_explorer.gui.main_window.save_listing",
+                return_value=tmp_path / "listing.txt",
+            ):
+                # action_code=1 → _do_save
+                win._on_scan_complete(1, str(tmp_path), EntryKind.FILES, "", "file", entries)
+
+            status = win._status_bar.currentMessage()
+            assert status, "Status bar must show a non-empty message after scan complete"
+            # The save path includes the listing path
+            assert "listing.txt" in status or "saved" in status.lower(), (
+                f"Status must mention saved listing, got: {status!r}"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_worker_progress_signal_emitted(self, qapp, tmp_path):
+        """_ScanWorker emits progress() signal every _PROGRESS_INTERVAL entries.
+
+        Build a tree with > _PROGRESS_INTERVAL files and assert at least one
+        progress emission occurs before finished.
+        """
+        from ff_explorer import EntryKind
+        from ff_explorer.gui.main_window import _ScanWorker, _PROGRESS_INTERVAL
+        from PySide6.QtCore import QThread
+
+        # Create _PROGRESS_INTERVAL + 1 files so progress fires at least once
+        for i in range(_PROGRESS_INTERVAL + 1):
+            (tmp_path / f"file_{i:04d}.txt").write_bytes(b"x")
+
+        progress_calls: list = []
+        finished_calls: list = []
+
+        worker = _ScanWorker(str(tmp_path), EntryKind.FILES, "", {})
+        thread = QThread()
+        worker.moveToThread(thread)
+        worker.progress.connect(lambda count, path: progress_calls.append((count, path)))
+        worker.finished.connect(lambda e: finished_calls.append(e))
+        thread.started.connect(worker.run)
+        thread.start()
+
+        done = self._spin_until(
+            lambda: bool(finished_calls),
+            timeout_ms=5000,
+        )
+        thread.quit()
+        thread.wait()
+
+        assert done, "Worker did not finish within 5 s"
+        assert len(progress_calls) >= 1, (
+            f"Worker must emit at least one progress() signal when > "
+            f"{_PROGRESS_INTERVAL} entries are scanned"
+        )
