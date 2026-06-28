@@ -117,7 +117,12 @@ class _EntryRow(QWidget):
         self._path = path
         self.setFixedHeight(_ROW_HEIGHT)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        # Dynamic path data tooltip — not a help-registry entry (SPEC-02 note).
+        # setToolTip(path): path is a variable (not a string literal), so the
+        # SPEC-09 grep lint passes.  Accessible description is also set from
+        # the same data for keyboard/screen-reader accessibility (SPEC-03).
         self.setToolTip(path)
+        self.setAccessibleDescription(path)
 
         # Layout: bar placeholder (fixed width) + filename + size
         outer = QVBoxLayout(self)
@@ -140,7 +145,9 @@ class _EntryRow(QWidget):
         # Filename (truncated to basename for readability; full path in tooltip)
         name = Path(path).name
         name_lbl = QLabel(name)
+        # Dynamic path data tooltip — not a help-registry entry (SPEC-02 note).
         name_lbl.setToolTip(path)
+        name_lbl.setAccessibleDescription(path)
         name_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         name_lbl.setStyleSheet("font: 10pt Verdana; color: #141414;")
         row.addWidget(name_lbl)
