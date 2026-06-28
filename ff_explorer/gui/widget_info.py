@@ -79,6 +79,9 @@ WIDGET_INFO: dict[str, str] = {
         "\n   For folders, compress each one in root"
     ),
 
+    # ---- Run button ----
+    "run": "Execute the configured search and apply the selected action.",
+
     # ---- Utility buttons ----
     "filters_toggle": (
         "Expand to set match mode, size/date/extension filters."
@@ -218,6 +221,36 @@ def register_info(widget: "QWidget", key: str) -> None:
         When *key* is not in the registry (programmer error — fail fast).
     """
     text = info_text(key)
+    widget.setToolTip(text)
+    widget.setAccessibleDescription(text)
+    widget.setWhatsThis(text)
+    widget.setProperty("_ff_info_key", key)
+
+
+def register_info_text(widget: "QWidget", text: str, key: str) -> None:
+    """Attach explicit help text to *widget*, recording *key* as its registry id.
+
+    Used for widgets whose displayed tooltip text is composed at runtime from
+    multiple registry fragments (e.g. the Action combobox, which concatenates
+    the ``"action"`` base text with a per-action ``"action_detail.<code>"``
+    suffix).  The *key* is stored as the ``_ff_info_key`` property so SPEC-09
+    enumeration tools can identify the widget's primary registry association.
+
+    Sets (in order):
+    1. ``widget.setToolTip(text)``
+    2. ``widget.setAccessibleDescription(text)``
+    3. ``widget.setWhatsThis(text)``
+    4. ``widget.setProperty("_ff_info_key", key)``
+
+    Parameters
+    ----------
+    widget:
+        Any QWidget subclass.
+    text:
+        The fully composed help string to attach.
+    key:
+        The primary registry key to record (e.g. ``"action"``).
+    """
     widget.setToolTip(text)
     widget.setAccessibleDescription(text)
     widget.setWhatsThis(text)

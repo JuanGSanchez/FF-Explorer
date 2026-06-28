@@ -35,6 +35,8 @@ from PySide6.QtCore import QDate, QEvent, Qt
 from PySide6.QtGui import QKeyEvent, QMouseEvent
 from PySide6.QtWidgets import QMessageBox
 
+from ff_explorer.gui.widget_info import WIDGET_INFO, info_text, register_info_text
+
 from ff_explorer.gui.main_window import MainWindow, _ClickableLineEdit
 
 
@@ -2127,6 +2129,248 @@ class TestLiveIndexing:
             assert not win._live_index_check.isChecked(), (
                 "Checkbox must be reverted to unchecked when watchdog is missing"
             )
+        finally:
+            win.close()
+            win.deleteLater()
+
+
+# ---------------------------------------------------------------------------
+# A16 — SPEC-02/03/04: registry wiring, dynamic action tooltip, Shift+F1
+# ---------------------------------------------------------------------------
+
+class TestWidgetRegistryWiring:
+    """A16: All main widgets have _ff_info_key set via register_info;
+    action combo tooltip updates dynamically from the registry;
+    Shift+F1 shortcut exists and enters WhatsThis mode without crash."""
+
+    # Widgets expected to carry a _ff_info_key property after MainWindow init.
+    # These match every register_info() / register_info_text() call in _setup_ui
+    # and _build_filters_panel.
+    _EXPECTED_KEYS = {
+        "path",           # path_label, _path_edit
+        "path_browse",    # browse_btn
+        "seed",           # seed_label, _seed_edit
+        "mode_folders",   # _radio_folders
+        "mode_files",     # _radio_files
+        "action",         # _action_combo (dynamic via register_info_text)
+        "run",            # run_btn
+        "filters_toggle", # _filters_toggle_btn
+        "settings",       # settings_btn
+        "disk_usage",     # disk_usage_btn
+        "find_duplicates",# dup_btn
+        "batch_rename",   # rename_btn
+        "preset_save",    # preset_save_btn
+        "preset_load",    # preset_load_btn
+        "live_index",     # _live_index_check
+        "filter_match_mode",       # _match_mode_combo
+        "filter_case_sensitive",   # _case_sensitive_check
+        "filter_min_size",         # _min_size_spin
+        "filter_max_size",         # _max_size_spin
+        "filter_date_after",       # _date_after_check
+        "filter_date_after_edit",  # _date_after_edit
+        "filter_date_before",      # _date_before_check
+        "filter_date_before_edit", # _date_before_edit
+        "filter_extensions",       # _extensions_edit
+        "filter_content_query",    # _content_query_edit
+        "filter_search_archives",  # _search_archives_check
+        "filter_respect_ignore",   # _respect_ignore_check
+        "filter_ignore_globs",     # _ignore_globs_edit
+        "filter_versioning",       # _versioning_check
+    }
+
+    def test_run_key_exists_in_registry(self):
+        """WIDGET_INFO must contain the 'run' key (added for SPEC-02)."""
+        assert "run" in WIDGET_INFO, (
+            "'run' key must be present in WIDGET_INFO (SPEC-02 requirement)"
+        )
+        assert WIDGET_INFO["run"], "WIDGET_INFO['run'] must be a non-empty string"
+
+    def test_register_info_text_helper_exists(self):
+        """register_info_text must be importable from widget_info."""
+        # Already imported at top; verify it is callable with the right signature
+        from ff_explorer.gui.widget_info import register_info_text as rit
+        assert callable(rit)
+
+    def test_all_expected_registry_keys_present_in_widget_info(self):
+        """Every key in _EXPECTED_KEYS must exist in WIDGET_INFO."""
+        missing = [k for k in self._EXPECTED_KEYS if k not in WIDGET_INFO]
+        assert not missing, (
+            f"Missing keys in WIDGET_INFO: {missing}"
+        )
+
+    def test_main_widgets_have_ff_info_key_property(self, qapp):
+        """Every registered widget carries _ff_info_key set to a known registry key."""
+        from PySide6.QtWidgets import QWidget
+        win = MainWindow()
+        try:
+            found_keys: set[str] = set()
+            for child in win.findChildren(QWidget):
+                key = child.property("_ff_info_key")
+                if key:
+                    found_keys.add(key)
+            missing = self._EXPECTED_KEYS - found_keys
+            assert not missing, (
+                f"Widgets missing _ff_info_key property after MainWindow init: {missing}\n"
+                "Each widget listed above must be wired via register_info() or "
+                "register_info_text() in _setup_ui / _build_filters_panel."
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_action_combo_tooltip_changes_on_selection(self, qapp):
+        """_update_action_tooltip sets a non-empty tooltip that changes per action."""
+        win = MainWindow()
+        try:
+            tooltips: list[str] = []
+            items = [win._action_combo.itemText(i)
+                     for i in range(win._action_combo.count())]
+            for i, item in enumerate(items):
+                win._action_combo.setCurrentIndex(i)
+                tooltips.append(win._action_combo.toolTip())
+
+            # All tooltips must be non-empty strings
+            for i, tip in enumerate(tooltips):
+                assert isinstance(tip, str) and tip.strip(), (
+                    f"Action combo tooltip at index {i} ('{items[i]}') must be non-empty"
+                )
+
+            # Save list (code=1) and Remove list (code=2) tooltips must differ
+            # because they have different action_detail entries.
+            save_idx = items.index("Save list")
+            remove_idx = items.index("Remove list")
+            assert tooltips[save_idx] != tooltips[remove_idx], (
+                "Save list and Remove list tooltips must differ "
+                "(each has a distinct action_detail registry entry)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_action_combo_ff_info_key_is_action(self, qapp):
+        """_action_combo._ff_info_key must be 'action' after _update_action_tooltip."""
+        win = MainWindow()
+        try:
+            key = win._action_combo.property("_ff_info_key")
+            assert key == "action", (
+                f"_action_combo._ff_info_key must be 'action', got {key!r}"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_action_combo_whats_this_set(self, qapp):
+        """_action_combo.whatsThis() must be non-empty (register_info_text sets it)."""
+        win = MainWindow()
+        try:
+            wt = win._action_combo.whatsThis()
+            assert isinstance(wt, str) and wt.strip(), (
+                "_action_combo.whatsThis() must be non-empty after _update_action_tooltip"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_section_labels_have_object_name(self, qapp):
+        """path_label and seed_label must have objectName='sectionLabel'."""
+        from PySide6.QtWidgets import QLabel
+        win = MainWindow()
+        try:
+            section_labels = [
+                lbl for lbl in win.findChildren(QLabel)
+                if lbl.objectName() == "sectionLabel"
+            ]
+            assert len(section_labels) >= 2, (
+                "At least 2 QLabel widgets must have objectName='sectionLabel' "
+                "(path_label and seed_label — SPEC-04)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_run_button_has_object_name(self, qapp):
+        """run_btn must have objectName='runButton'."""
+        from PySide6.QtWidgets import QPushButton
+        win = MainWindow()
+        try:
+            run_btns = [
+                btn for btn in win.findChildren(QPushButton)
+                if btn.objectName() == "runButton"
+            ]
+            assert len(run_btns) == 1, (
+                "Exactly one QPushButton must have objectName='runButton' (SPEC-04)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_theme_stylesheet_contains_section_label_rule(self):
+        """build_stylesheet must produce QSS containing QLabel#sectionLabel."""
+        from ff_explorer.gui.theme import build_stylesheet, LIGHT, DARK
+        for name, theme in [("LIGHT", LIGHT), ("DARK", DARK)]:
+            qss = build_stylesheet(theme)
+            assert "QLabel#sectionLabel" in qss, (
+                f"build_stylesheet({name}) must contain a QLabel#sectionLabel rule (SPEC-04)"
+            )
+            assert "QPushButton#runButton" in qss, (
+                f"build_stylesheet({name}) must contain a QPushButton#runButton rule (SPEC-04)"
+            )
+
+    def test_theme_has_exactly_one_qtoolip_block(self):
+        """build_stylesheet must contain exactly one QToolTip {{ block (SPEC-04)."""
+        from ff_explorer.gui.theme import build_stylesheet, LIGHT
+        qss = build_stylesheet(LIGHT)
+        count = qss.count("QToolTip {")
+        assert count == 1, (
+            f"build_stylesheet must contain exactly one 'QToolTip {{' block, found {count} (SPEC-04)"
+        )
+
+    def test_shift_f1_shortcut_wired_in_main_window(self, qapp):
+        """MainWindow must have a QShortcut for Shift+F1 that enters WhatsThis mode."""
+        from PySide6.QtGui import QKeySequence, QShortcut
+        win = MainWindow()
+        try:
+            shortcuts = win.findChildren(QShortcut)
+            shift_f1_shortcuts = [
+                s for s in shortcuts
+                if s.key() == QKeySequence("Shift+F1")
+            ]
+            assert len(shift_f1_shortcuts) >= 1, (
+                "MainWindow must have a QShortcut with key Shift+F1 (SPEC-04)"
+            )
+        finally:
+            win.close()
+            win.deleteLater()
+
+    def test_no_inline_stylesheet_overrides_on_core_widgets(self, qapp):
+        """path_label, seed_label, run_btn must NOT carry hard-coded inline styleSheet
+        with literal colour values — styling must come from the theme QSS only."""
+        from PySide6.QtWidgets import QLabel, QPushButton
+        win = MainWindow()
+        try:
+            # Check sectionLabel widgets: their styleSheet() must be empty
+            # (the visual styling is applied via QLabel#sectionLabel in the theme QSS)
+            section_labels = [
+                lbl for lbl in win.findChildren(QLabel)
+                if lbl.objectName() == "sectionLabel"
+            ]
+            for lbl in section_labels:
+                ss = lbl.styleSheet()
+                assert not ss, (
+                    f"sectionLabel '{lbl.text()}' must not carry an inline styleSheet "
+                    f"(got: {ss!r}) — SPEC-04 requires central theming only"
+                )
+            # run_btn inline styleSheet must also be empty
+            run_btns = [
+                btn for btn in win.findChildren(QPushButton)
+                if btn.objectName() == "runButton"
+            ]
+            for btn in run_btns:
+                ss = btn.styleSheet()
+                assert not ss, (
+                    f"runButton must not carry an inline styleSheet "
+                    f"(got: {ss!r}) — SPEC-04 requires central theming only"
+                )
         finally:
             win.close()
             win.deleteLater()

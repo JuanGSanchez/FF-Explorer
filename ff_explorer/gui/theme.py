@@ -323,6 +323,12 @@ QLabel {{
     color: {t.label_text};
     background-color: transparent;
 }}
+QLabel#sectionLabel {{
+    background-color: {t.header_bg};
+    color: {t.accent};
+    font: bold 12pt Arial;
+    padding: 4px;
+}}
 
 /* ---- Buttons ---- */
 QPushButton {{
@@ -343,6 +349,18 @@ QPushButton:disabled {{
 }}
 QPushButton:pressed {{
     background-color: {t.button_hover_bg};
+}}
+QPushButton#runButton {{
+    background-color: {t.button_bg};
+    color: {t.button_text};
+    font: bold 12pt Arial;
+    padding: 6px 10px;
+    border: 1px solid {t.button_border};
+    border-radius: 4px;
+}}
+QPushButton#runButton:hover {{
+    background-color: {t.button_hover_bg};
+    border-color: {t.accent};
 }}
 
 /* ---- Input fields ---- */

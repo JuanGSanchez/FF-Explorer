@@ -72,7 +72,7 @@ import gc
 from pathlib import Path
 
 from PySide6.QtCore import QDate, QDateTime, Qt, QTimeZone
-from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtGui import QIcon, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -97,10 +97,12 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QStatusBar,
     QVBoxLayout,
+    QWhatsThis,
     QWidget,
 )
 
 from ff_explorer.gui.theme import build_stylesheet, load_saved_theme
+from ff_explorer.gui.widget_info import info_text, register_info, register_info_text
 
 from ff_explorer import (
     EmptySeedError,
@@ -135,23 +137,6 @@ _ACTION_LABELS: dict[str, int] = {
     "Save list": 1,
     "Remove list": 2,
     "Compress list": 3,
-}
-
-# Hover-help texts for each control (mirrors legacy text_man1..text_man5)
-_HELP_PATH = "Root path in which\nfiles or folders are searched."
-_HELP_SEED = "List of consecutive characters\ncontained in files/folders' name."
-_HELP_FOLDERS = "Folders search."
-_HELP_FILES = "Files search."
-_HELP_ACTION = "Actions to be applied to the resulting directory."
-
-# Per-action supplementary help text (mirrors legacy aux_man)
-_HELP_ACTION_DETAIL: dict[int, str] = {
-    1: "\n   Save directory of files/folders found",
-    2: "\n   Delete files/folders found",
-    3: (
-        "\n   For files, compress all in one .zip in root"
-        "\n   For folders, compress each one in root"
-    ),
 }
 
 # Match-mode display labels → core param values
@@ -251,10 +236,8 @@ class MainWindow(QMainWindow):
         # ---- Root path section ----
         path_label = QLabel("Root path")
         path_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        path_label.setStyleSheet(
-            "background-color: #999999; color: blue; font: bold 12pt Arial; padding: 4px;"
-        )
-        path_label.setToolTip(_HELP_PATH)
+        path_label.setObjectName("sectionLabel")
+        register_info(path_label, "path")
         outer.addWidget(path_label)
 
         path_row = QHBoxLayout()
@@ -263,20 +246,14 @@ class MainWindow(QMainWindow):
         )
         self._path_edit.setReadOnly(True)
         self._path_edit.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._path_edit.setStyleSheet(
-            "background-color: white; color: black; font: 11pt Verdana; padding: 4px;"
-        )
-        self._path_edit.setToolTip(_HELP_PATH)
+        register_info(self._path_edit, "path")
         # Clicking the read-only field opens the folder picker — handled by
         # _ClickableLineEdit.mousePressEvent (calls super() then on_click)
         path_row.addWidget(self._path_edit)
 
         browse_btn = QPushButton("Browse...")
         browse_btn.setFixedWidth(72)
-        browse_btn.setStyleSheet(
-            "background-color: white; color: black; font: 11pt Arial;"
-        )
-        browse_btn.setToolTip(_HELP_PATH)
+        register_info(browse_btn, "path_browse")
         browse_btn.clicked.connect(self._browse_path)
         path_row.addWidget(browse_btn)
         outer.addLayout(path_row)
@@ -284,17 +261,12 @@ class MainWindow(QMainWindow):
         # ---- Name seed section ----
         seed_label = QLabel("Name seed")
         seed_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        seed_label.setStyleSheet(
-            "background-color: #999999; color: blue; font: bold 12pt Arial; padding: 4px;"
-        )
-        seed_label.setToolTip(_HELP_SEED)
+        seed_label.setObjectName("sectionLabel")
+        register_info(seed_label, "seed")
         outer.addWidget(seed_label)
 
         self._seed_edit = QLineEdit()
-        self._seed_edit.setStyleSheet(
-            "background-color: white; color: black; font: 11pt Verdana; padding: 4px;"
-        )
-        self._seed_edit.setToolTip(_HELP_SEED)
+        register_info(self._seed_edit, "seed")
         self._seed_edit.returnPressed.connect(self._run)
         outer.addWidget(self._seed_edit)
 
@@ -303,18 +275,12 @@ class MainWindow(QMainWindow):
         self._mode_group = QButtonGroup(self)
         self._radio_folders = QRadioButton("Folders")
         self._radio_folders.setChecked(True)  # d_type default = 0 (FOLDERS)
-        self._radio_folders.setStyleSheet(
-            "color: black; font: 12pt Verdana;"
-        )
-        self._radio_folders.setToolTip(_HELP_FOLDERS)
+        register_info(self._radio_folders, "mode_folders")
         self._mode_group.addButton(self._radio_folders, EntryKind.FOLDERS.value)
         mode_row.addWidget(self._radio_folders)
 
         self._radio_files = QRadioButton("Files")
-        self._radio_files.setStyleSheet(
-            "color: black; font: 12pt Verdana;"
-        )
-        self._radio_files.setToolTip(_HELP_FILES)
+        register_info(self._radio_files, "mode_files")
         self._mode_group.addButton(self._radio_files, EntryKind.FILES.value)
         mode_row.addWidget(self._radio_files)
         outer.addLayout(mode_row)
@@ -322,9 +288,6 @@ class MainWindow(QMainWindow):
         # ---- Action combobox ----
         self._action_combo = QComboBox()
         self._action_combo.addItems(list(_ACTION_LABELS.keys()))
-        self._action_combo.setStyleSheet(
-            "background-color: #e6e6e6; font: 12pt Verdana; padding: 2px;"
-        )
         # Build combined tooltip for the combobox (action name + detail)
         self._action_combo.currentIndexChanged.connect(self._update_action_tooltip)
         self._update_action_tooltip()  # set initial tooltip
@@ -333,13 +296,12 @@ class MainWindow(QMainWindow):
         # ---- Run button ----
         run_btn = QPushButton("Run")
         run_btn.setFixedWidth(80)
-        run_btn.setStyleSheet(
-            "background-color: white; color: black; font: bold 12pt Arial; padding: 6px;"
-        )
+        run_btn.setObjectName("runButton")
         run_btn.setSizePolicy(
             QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed
         )
         run_btn.setDefault(True)
+        register_info(run_btn, "run")
         run_btn.clicked.connect(self._run)
 
         btn_row = QHBoxLayout()
@@ -350,9 +312,7 @@ class MainWindow(QMainWindow):
 
         # ---- Filters toggle button (FFX-I01 / FFX-I02) ----
         self._filters_toggle_btn = QPushButton("Filters ▶")
-        self._filters_toggle_btn.setToolTip(
-            "Expand to set match mode, size/date/extension filters."
-        )
+        register_info(self._filters_toggle_btn, "filters_toggle")
         self._filters_toggle_btn.setCheckable(True)
         self._filters_toggle_btn.setChecked(False)
         self._filters_toggle_btn.clicked.connect(self._toggle_filters)
@@ -371,9 +331,7 @@ class MainWindow(QMainWindow):
         # ---- Settings button ----
         settings_btn = QPushButton("⚙ Settings")  # gear unicode
         settings_btn.setFixedWidth(100)
-        settings_btn.setToolTip(
-            "Open Settings to configure the application colour theme."
-        )
+        register_info(settings_btn, "settings")
         settings_btn.clicked.connect(self._open_settings)
 
         settings_row = QHBoxLayout()
@@ -384,9 +342,7 @@ class MainWindow(QMainWindow):
         # ---- Disk usage button (FFX-I11) ----
         disk_usage_btn = QPushButton("Disk usage")
         disk_usage_btn.setFixedWidth(100)
-        disk_usage_btn.setToolTip(
-            "Show the largest files under the current root path."
-        )
+        register_info(disk_usage_btn, "disk_usage")
         disk_usage_btn.clicked.connect(self._open_disk_usage)
 
         disk_usage_row = QHBoxLayout()
@@ -397,10 +353,7 @@ class MainWindow(QMainWindow):
         # ---- Find duplicates button (FFX-I06) ----
         dup_btn = QPushButton("Find duplicates")
         dup_btn.setFixedWidth(130)
-        dup_btn.setToolTip(
-            "Find groups of files with identical content under the current root path.\n"
-            "Results are shown in a read-only dialog."
-        )
+        register_info(dup_btn, "find_duplicates")
         dup_btn.clicked.connect(self._open_find_duplicates)
 
         dup_row = QHBoxLayout()
@@ -411,10 +364,7 @@ class MainWindow(QMainWindow):
         # ---- Batch rename button (FFX-I07) ----
         rename_btn = QPushButton("Batch rename")
         rename_btn.setFixedWidth(130)
-        rename_btn.setToolTip(
-            "Open the batch rename dialog to define a rule, preview changes,\n"
-            "and apply renaming to matched entries."
-        )
+        register_info(rename_btn, "batch_rename")
         rename_btn.clicked.connect(self._open_batch_rename)
 
         rename_row = QHBoxLayout()
@@ -425,16 +375,12 @@ class MainWindow(QMainWindow):
         # ---- Preset save/load row (FFX-I03) ----
         preset_save_btn = QPushButton("Save preset")
         preset_save_btn.setFixedWidth(110)
-        preset_save_btn.setToolTip(
-            "Save the current search form state as a named preset."
-        )
+        register_info(preset_save_btn, "preset_save")
         preset_save_btn.clicked.connect(self._save_preset)
 
         preset_load_btn = QPushButton("Load preset")
         preset_load_btn.setFixedWidth(110)
-        preset_load_btn.setToolTip(
-            "Load a saved preset back into the search form."
-        )
+        register_info(preset_load_btn, "preset_load")
         preset_load_btn.clicked.connect(self._load_preset)
 
         preset_row = QHBoxLayout()
@@ -447,12 +393,12 @@ class MainWindow(QMainWindow):
         # ---- Live index checkbox (FFX-I10) ----
         self._live_index_check = QCheckBox("Live index this root")
         self._live_index_check.setChecked(False)
-        self._live_index_check.setToolTip(
-            "Build an in-memory name index for the current root and watch for\n"
-            "filesystem changes in real time.  Queries use the index instead of\n"
-            "walking the tree.  Uncheck to stop and release the observer thread."
-        )
+        register_info(self._live_index_check, "live_index")
         self._live_index_check.toggled.connect(self._toggle_live_index)
+
+        # ---- Shift+F1 shortcut: enter WhatsThis mode (SPEC-04) ----
+        whats_this_shortcut = QShortcut(QKeySequence("Shift+F1"), self)
+        whats_this_shortcut.activated.connect(QWhatsThis.enterWhatsThisMode)
 
         index_row = QHBoxLayout()
         index_row.addStretch()
@@ -488,19 +434,12 @@ class MainWindow(QMainWindow):
 
         self._match_mode_combo = QComboBox()
         self._match_mode_combo.addItems(list(_MATCH_MODE_LABELS.keys()))
-        self._match_mode_combo.setToolTip(
-            "Substring: seed 'in' name (default).\n"
-            "Glob: fnmatch pattern (*, ?, […]).\n"
-            "Regex: full regular expression."
-        )
+        register_info(self._match_mode_combo, "filter_match_mode")
         match_row.addWidget(self._match_mode_combo)
 
         self._case_sensitive_check = QCheckBox("Case sensitive")
         self._case_sensitive_check.setChecked(True)
-        self._case_sensitive_check.setToolTip(
-            "When unchecked, the name match ignores case.\n"
-            "For Regex mode, re.IGNORECASE is applied."
-        )
+        register_info(self._case_sensitive_check, "filter_case_sensitive")
         match_row.addWidget(self._case_sensitive_check)
 
         layout.addLayout(match_row)
@@ -515,7 +454,7 @@ class MainWindow(QMainWindow):
         self._min_size_spin.setRange(0, 10_000_000)  # up to ~10 GB in KB
         self._min_size_spin.setValue(0)
         self._min_size_spin.setSpecialValueText("–")  # 0 displays as "–" (no bound)
-        self._min_size_spin.setToolTip("Minimum file size in KB (0 = no lower bound).")
+        register_info(self._min_size_spin, "filter_min_size")
         size_row.addWidget(self._min_size_spin)
 
         size_row.addWidget(QLabel("–"))
@@ -524,7 +463,7 @@ class MainWindow(QMainWindow):
         self._max_size_spin.setRange(0, 10_000_000)
         self._max_size_spin.setValue(0)
         self._max_size_spin.setSpecialValueText("–")  # 0 displays as "–" (no bound)
-        self._max_size_spin.setToolTip("Maximum file size in KB (0 = no upper bound).")
+        register_info(self._max_size_spin, "filter_max_size")
         size_row.addWidget(self._max_size_spin)
 
         layout.addLayout(size_row)
@@ -533,16 +472,14 @@ class MainWindow(QMainWindow):
         after_row = QHBoxLayout()
         self._date_after_check = QCheckBox("Modified after:")
         self._date_after_check.setChecked(False)
-        self._date_after_check.setToolTip(
-            "Only include entries modified strictly after this date."
-        )
+        register_info(self._date_after_check, "filter_date_after")
         after_row.addWidget(self._date_after_check)
 
         self._date_after_edit = QDateEdit()
         self._date_after_edit.setCalendarPopup(True)
         self._date_after_edit.setDate(QDate.currentDate().addDays(-30))
         self._date_after_edit.setEnabled(False)
-        self._date_after_edit.setToolTip("Lower bound on modification date.")
+        register_info(self._date_after_edit, "filter_date_after_edit")
         after_row.addWidget(self._date_after_edit)
 
         layout.addLayout(after_row)
@@ -552,16 +489,14 @@ class MainWindow(QMainWindow):
         before_row = QHBoxLayout()
         self._date_before_check = QCheckBox("Modified before:")
         self._date_before_check.setChecked(False)
-        self._date_before_check.setToolTip(
-            "Only include entries modified strictly before this date."
-        )
+        register_info(self._date_before_check, "filter_date_before")
         before_row.addWidget(self._date_before_check)
 
         self._date_before_edit = QDateEdit()
         self._date_before_edit.setCalendarPopup(True)
         self._date_before_edit.setDate(QDate.currentDate())
         self._date_before_edit.setEnabled(False)
-        self._date_before_edit.setToolTip("Upper bound on modification date.")
+        register_info(self._date_before_edit, "filter_date_before_edit")
         before_row.addWidget(self._date_before_edit)
 
         layout.addLayout(before_row)
@@ -575,11 +510,7 @@ class MainWindow(QMainWindow):
 
         self._extensions_edit = QLineEdit()
         self._extensions_edit.setPlaceholderText(".txt, .md, .log")
-        self._extensions_edit.setToolTip(
-            "Comma or space-separated extensions to include.\n"
-            "Example: .txt, .md\n"
-            "Leave empty for no extension filter."
-        )
+        register_info(self._extensions_edit, "filter_extensions")
         ext_row.addWidget(self._extensions_edit)
 
         layout.addLayout(ext_row)
@@ -591,12 +522,7 @@ class MainWindow(QMainWindow):
 
         self._content_query_edit = QLineEdit()
         self._content_query_edit.setPlaceholderText("grep pattern (requires name/type/size pre-filter)")
-        self._content_query_edit.setToolTip(
-            "Grep-style search inside file contents.\n"
-            "Only files whose content matches this query are returned.\n"
-            "REQUIRES at least one name/extension/size filter to be set\n"
-            "to limit the candidate set (performance gate)."
-        )
+        register_info(self._content_query_edit, "filter_content_query")
         content_row.addWidget(self._content_query_edit)
 
         layout.addLayout(content_row)
@@ -604,20 +530,13 @@ class MainWindow(QMainWindow):
         # ---- Archive transparency (FFX-I05) ----
         self._search_archives_check = QCheckBox("Search inside archives")
         self._search_archives_check.setChecked(False)
-        self._search_archives_check.setToolTip(
-            "When checked, open matching ZIP/TAR/GZ archives and search their\n"
-            "internal member names against the name seed.\n"
-            "Archive-internal results are read-only and cannot be removed/compressed."
-        )
+        register_info(self._search_archives_check, "filter_search_archives")
         layout.addWidget(self._search_archives_check)
 
         # ---- Ignore-file awareness (FFX-I04) ----
         self._respect_ignore_check = QCheckBox("Respect .gitignore/.ignore")
         self._respect_ignore_check.setChecked(False)
-        self._respect_ignore_check.setToolTip(
-            "When checked, .gitignore and .ignore files found during the walk\n"
-            "are honoured; matching paths are excluded from results."
-        )
+        register_info(self._respect_ignore_check, "filter_respect_ignore")
         layout.addWidget(self._respect_ignore_check)
 
         ignore_globs_row = QHBoxLayout()
@@ -626,10 +545,7 @@ class MainWindow(QMainWindow):
 
         self._ignore_globs_edit = QLineEdit()
         self._ignore_globs_edit.setPlaceholderText("*.pyc, __pycache__/")
-        self._ignore_globs_edit.setToolTip(
-            "Extra gitwildmatch glob patterns to exclude (comma or space separated).\n"
-            "Applied regardless of the .gitignore checkbox above."
-        )
+        register_info(self._ignore_globs_edit, "filter_ignore_globs")
         ignore_globs_row.addWidget(self._ignore_globs_edit)
 
         layout.addLayout(ignore_globs_row)
@@ -637,12 +553,7 @@ class MainWindow(QMainWindow):
         # ---- Versioned delete checkbox (FFX-I08) — shown only for Remove action ----
         self._versioning_check = QCheckBox("Version (move to .ffe-versions) instead of recycle bin")
         self._versioning_check.setChecked(False)
-        self._versioning_check.setToolTip(
-            "When checked, removed entries are moved into a timestamped\n"
-            "<root>/.ffe-versions/<YYYYMMDD-HHMMSS>/ directory instead of the\n"
-            "recycle bin.  Provides a stronger, auditable recovery trail.\n"
-            "Applies only to the 'Remove list' action."
-        )
+        register_info(self._versioning_check, "filter_versioning")
         layout.addWidget(self._versioning_check)
 
         return box
@@ -847,11 +758,23 @@ class MainWindow(QMainWindow):
         return EntryKind(btn_id)
 
     def _update_action_tooltip(self) -> None:
-        """Update the action combobox tooltip to include per-action detail."""
+        """Update the action combobox tooltip to include per-action detail.
+
+        Sources both parts from the registry:
+          base  = info_text("action")
+          detail = info_text("action_detail.<code>"), falls back to "" if absent.
+        Uses register_info_text so the _ff_info_key property is set to "action"
+        and all four widget-info setters (tooltip, accessible description,
+        whatsThis, _ff_info_key) are applied consistently.
+        """
         label = self._action_combo.currentText()
         code = _ACTION_LABELS.get(label, -1)
-        detail = _HELP_ACTION_DETAIL.get(code, "")
-        self._action_combo.setToolTip(_HELP_ACTION + detail)
+        base = info_text("action")
+        try:
+            detail = info_text(f"action_detail.{code}")
+        except KeyError:
+            detail = ""
+        register_info_text(self._action_combo, base + detail, "action")
 
     def _set_status(self, message: str) -> None:
         """Write *message* to the status bar (replaces print() calls)."""
