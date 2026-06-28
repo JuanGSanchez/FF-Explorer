@@ -2342,6 +2342,35 @@ class TestWidgetRegistryWiring:
             win.close()
             win.deleteLater()
 
+    def test_no_inline_tooltip_literals_in_gui_package(self):
+        """SPEC-09 lint: no inline ``setToolTip("literal")`` / ``setWhatsThis("literal")``
+        string literal may appear anywhere in the GUI package — every call must
+        reference the central registry (via register_info / register_info_text).
+
+        ``register_info`` itself calls ``widget.setToolTip(text)`` where *text* is
+        a variable (registry lookup), and treemap_view uses ``setToolTip(path)``
+        with a variable — neither matches the literal pattern, so both pass.
+        """
+        import re
+        from pathlib import Path
+
+        gui_dir = Path(__file__).resolve().parent.parent / "ff_explorer" / "gui"
+        # Match setToolTip(  or setWhatsThis(  immediately followed by a quote.
+        literal_pattern = re.compile(r"""set(?:ToolTip|WhatsThis)\(\s*["']""")
+
+        offenders: list[str] = []
+        for py_file in gui_dir.glob("*.py"):
+            text = py_file.read_text(encoding="utf-8")
+            for lineno, line in enumerate(text.splitlines(), start=1):
+                if literal_pattern.search(line):
+                    offenders.append(f"{py_file.name}:{lineno}: {line.strip()}")
+
+        assert not offenders, (
+            "Inline tooltip/whatsThis string literals found in the GUI package — "
+            "route them through the widget_info registry (SPEC-02/03/09):\n"
+            + "\n".join(offenders)
+        )
+
     def test_no_inline_stylesheet_overrides_on_core_widgets(self, qapp):
         """path_label, seed_label, run_btn must NOT carry hard-coded inline styleSheet
         with literal colour values — styling must come from the theme QSS only."""
