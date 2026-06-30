@@ -1,0 +1,103 @@
+# .github/workflows/release.yml
+# ---------------------------------------------------------------------------
+# Continuous Delivery for FF-Explorer
+#
+# Builds the standalone desktop executable with PyInstaller (via the repo's
+# packaging/build.py) on Windows, Linux, and macOS, then attaches all three
+# builds to a GitHub Release.
+#
+# WHAT THIS WORKFLOW DEMONSTRATES (beyond ci.yml):
+#   - Tag trigger        runs only when you push a version tag (e.g. v1.0.0)
+#   - OS build matrix    one self-contained build per operating system
+#   - Job dependencies   `needs:` makes the release job wait for every build
+#   - Cross-job data     upload-artifact (build job) -> download-artifact (release)
+#   - GITHUB_TOKEN       `permissions: contents: write` lets the job cut a Release
+#
+# HOW TO TRIGGER:
+#   git tag v1.0.0
+#   git push origin v1.0.0
+# ---------------------------------------------------------------------------
+name: Release
+
+on:
+  push:
+    tags: ["v*"]            # any tag starting with v, e.g. v1.0.0
+
+# The release job creates a GitHub Release, which is a write to repo contents.
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false      # one OS failing should not hide the others
+      matrix:
+        include:
+          - os: windows-latest
+            label: windows
+          - os: ubuntu-latest
+            label: linux
+          - os: macos-latest
+            label: macos
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"     # campaign build ceiling (FastMCP caps at 3.13)
+          cache: pip
+
+      # PyInstaller's frozen GUI binary needs Qt libs present at build time on Linux.
+      - name: Install Qt runtime libraries (Linux only)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libgl1 libxkbcommon0 libdbus-1-3 libglib2.0-0
+
+      - name: Install project + build tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"     # [dev] includes pyinstaller; PySide6 is a core dep
+
+      # The cross-platform build driver emits packaging/bin/<App>/ for this OS.
+      - name: Build standalone executable
+        run: python packaging/build.py
+
+      # Archive the per-OS output into one file so it attaches cleanly to the Release.
+      - name: Package build output
+        shell: bash
+        run: |
+          tar -czf "FFExplorer-${{ matrix.label }}.tar.gz" -C packaging/bin .
+          ls -la "FFExplorer-${{ matrix.label }}.tar.gz"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FFExplorer-${{ matrix.label }}
+          path: FFExplorer-${{ matrix.label }}.tar.gz
+
+  release:
+    name: publish release
+    needs: build                 # wait for ALL three matrix builds
+    runs-on: ubuntu-latest
+    steps:
+      # Pull every artifact uploaded above into ./dist/<artifact-name>/...
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      # Create (or update) the Release for this tag and attach the builds.
+      # softprops/action-gh-release uses the auto-provided GITHUB_TOKEN.
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/**/*.tar.gz
+          generate_release_notes: true
