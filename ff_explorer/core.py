@@ -1369,12 +1369,13 @@ def entry_metadata(path: str | Path) -> dict:
     FileNotFoundError
         If *path* does not exist.
     """
-    p = Path(path).resolve()
+    orig = Path(path)
+    p = orig.resolve()
     if not p.exists():
         raise FileNotFoundError(f"path does not exist: {path!r}")
 
     stat = p.stat()
-    if p.is_symlink():
+    if orig.is_symlink():
         entry_type = "symlink"
     elif p.is_file():
         entry_type = "file"
